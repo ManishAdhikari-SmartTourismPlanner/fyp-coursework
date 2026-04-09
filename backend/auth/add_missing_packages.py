@@ -20,10 +20,10 @@ destinations = [
 ]
 
 package_templates = {
-    'budget': {
-        'package_type': 'budget',
+    'normal': {
+        'package_type': 'normal',
         'price_multiplier': 0.6,  # 60% of standard
-        'description_suffix': '- Budget Package',
+        'description_suffix': '- Normal Package',
         'includes': 'Basic accommodations, guide service, permits, shared meals',
         'excludes': 'International flight, travel insurance, personal expenses, tips'
     },
@@ -76,7 +76,7 @@ for dest_name in destinations:
                     package_type=pkg_type,
                     tour_type=dest.tour_type,
                     duration_days=dest.suggested_duration_days,
-                    max_group_size=12 if pkg_type == 'budget' else (8 if pkg_type == 'deluxe' else 10),
+                    max_group_size=12 if pkg_type == 'normal' else (8 if pkg_type == 'deluxe' else 10),
                     price_npr=price,
                     description=f"{dest.description} - {config['description_suffix']}",
                     includes=config['includes'],

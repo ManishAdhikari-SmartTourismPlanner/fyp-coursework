@@ -19,6 +19,26 @@ export default function DestinationSearchPage() {
     loadDestinations()
   }, [search, filters])
 
+  async function loadAllPages(fetchFunc, initialData = {}) {
+    let allResults = [...(initialData.results || [initialData])]
+    let nextUrl = initialData.next
+
+    while (nextUrl) {
+      try {
+        const url = new URL(nextUrl)
+        const params = Object.fromEntries(url.searchParams)
+        const response = await fetchFunc(params)
+        allResults = [...allResults, ...(response.results || [])]
+        nextUrl = response.next
+      } catch (err) {
+        console.error('Error loading next page:', err)
+        break
+      }
+    }
+
+    return allResults
+  }
+
   async function loadDestinations() {
     setLoading(true)
     setError('')
@@ -28,7 +48,8 @@ export default function DestinationSearchPage() {
         ...Object.fromEntries(Object.entries(filters).filter(([_, v]) => v)),
       }
       const data = await fetchDestinations(params)
-      setDestinations(data.results || data)
+      const rows = await loadAllPages(fetchDestinations, data)
+      setDestinations(rows)
     } catch (err) {
       setError(err.message || 'Failed to load destinations')
     } finally {

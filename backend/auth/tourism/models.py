@@ -90,7 +90,7 @@ class OfflineMap(TimeStampedModel):
 
 
 class Package(TimeStampedModel):
-	PACKAGE_BUDGET = 'budget'
+	PACKAGE_NORMAL = 'normal'
 	PACKAGE_STANDARD = 'standard'
 	PACKAGE_DELUXE = 'deluxe'
 
@@ -98,7 +98,7 @@ class Package(TimeStampedModel):
 	TOUR_TRAVELING = 'traveling'
 
 	PACKAGE_TYPE_CHOICES = [
-		(PACKAGE_BUDGET, 'Budget'),
+		(PACKAGE_NORMAL, 'Normal'),
 		(PACKAGE_STANDARD, 'Standard'),
 		(PACKAGE_DELUXE, 'Deluxe'),
 	]

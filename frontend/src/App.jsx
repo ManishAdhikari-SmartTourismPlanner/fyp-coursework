@@ -10,6 +10,7 @@ import DestinationSearch from './pages/DestinationSearch'
 import PackagesBrowse from './pages/PackagesBrowse'
 import PackageDetails from './pages/PackageDetails'
 import BookingFlow from './pages/BookingFlow'
+import OfflineMapsPage from './pages/OfflineMapsPage'
 import ESewaSuccessPage from './pages/ESewaSuccessPage'
 import ESewaFailurePage from './pages/ESewaFailurePage'
 import MockESewaPayment from './pages/MockESewaPayment'
@@ -33,6 +34,7 @@ function App() {
       <Route path="/packages" element={<ProtectedRoute><PackagesBrowse /></ProtectedRoute>} />
       <Route path="/package/:id" element={<ProtectedRoute><PackageDetails /></ProtectedRoute>} />
       <Route path="/booking" element={<ProtectedRoute><BookingFlow /></ProtectedRoute>} />
+      <Route path="/offline-maps" element={<ProtectedRoute><OfflineMapsPage /></ProtectedRoute>} />
       
       {/* Payment Callback Pages */}
       <Route path="/payment/esewa-success" element={<ESewaSuccessPage />} />

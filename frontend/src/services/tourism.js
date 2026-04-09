@@ -110,17 +110,26 @@ export async function fetchPackageDepartures(packageId) {
   return authRequest(`/api/tourism/packages/${packageId}/departures/`);
 }
 
+export async function createPackageDeparture(payload) {
+  return authRequest('/api/tourism/departures/', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
 export async function filterPackagesByPrice(minPrice, maxPrice) {
   return authRequest(`/api/tourism/packages/price_filter/?min_price=${minPrice}&max_price=${maxPrice}`);
 }
 
 // ===== BOOKINGS =====
-export async function fetchMyBookings() {
-  return authRequest('/api/tourism/bookings/');
+export async function fetchMyBookings(params = {}) {
+  const query = new URLSearchParams(params);
+  return authRequest(`/api/tourism/bookings/?${query.toString()}`);
 }
 
-export async function fetchAllBookings() {
-  return authRequest('/api/tourism/bookings/');
+export async function fetchAllBookings(params = {}) {
+  const query = new URLSearchParams(params);
+  return authRequest(`/api/tourism/bookings/?${query.toString()}`);
 }
 
 export async function createBooking(payload) {
@@ -150,6 +159,13 @@ export async function fetchBookingPaymentStatus(id) {
   return authRequest(`/api/tourism/bookings/${id}/payment_status/`);
 }
 
+export async function rescheduleBooking(id, newDepartureId) {
+  return authRequest(`/api/tourism/bookings/${id}/reschedule/`, {
+    method: 'POST',
+    body: JSON.stringify({ new_departure_id: newDepartureId }),
+  });
+}
+
 // ===== PAYMENTS =====
 export async function createPayment(payload) {
   return authRequest('/api/tourism/payments/', {
@@ -162,8 +178,39 @@ export async function fetchPaymentDetail(id) {
   return authRequest(`/api/tourism/payments/${id}/`);
 }
 
-export async function fetchAllPayments() {
-  return authRequest('/api/tourism/payments/');
+export async function fetchAllPayments(params = {}) {
+  const query = new URLSearchParams(params);
+  return authRequest(`/api/tourism/payments/?${query.toString()}`);
+}
+
+// ===== OFFLINE MAPS =====
+export async function fetchOfflineMaps(params = {}) {
+  const query = new URLSearchParams(params);
+  return authRequest(`/api/tourism/offline-maps/?${query.toString()}`);
+}
+
+export async function createOfflineMap(payload) {
+  return authRequest('/api/tourism/offline-maps/', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function updateOfflineMap(id, payload) {
+  return authRequest(`/api/tourism/offline-maps/${id}/`, {
+    method: 'PUT',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function deleteOfflineMap(id) {
+  return authRequest(`/api/tourism/offline-maps/${id}/`, {
+    method: 'DELETE',
+  });
+}
+
+export async function fetchLatestOfflineMaps(destinationId) {
+  return authRequest(`/api/tourism/offline-maps/latest/?destination=${destinationId}`);
 }
 
 // ===== eSEWA PAYMENT GATEWAY =====

@@ -11,9 +11,9 @@ mardi = Destination.objects.get(name='Mardi Himal Trek')
 
 packages_to_create = [
     {
-        'title': 'Mardi Himal Trek - Budget Package',
-        'slug': 'mardi-himal-trek-budget',
-        'package_type': 'budget',
+        'title': 'Mardi Himal Trek - Normal Package',
+        'slug': 'mardi-himal-trek-normal',
+        'package_type': 'normal',
         'tour_type': 'trekking',
         'duration_days': 6,
         'max_group_size': 16,

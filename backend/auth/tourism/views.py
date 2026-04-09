@@ -7,6 +7,8 @@ from django_filters.rest_framework import DjangoFilterBackend
 from django.utils import timezone
 from django.urls import reverse
 from django.conf import settings
+from django.db import transaction
+from datetime import timedelta
 
 from .models import (
     Destination, OfflineMap, Package, PackageDeparture,
@@ -89,14 +91,40 @@ class OfflineMapViewSet(viewsets.ModelViewSet):
     """ViewSet for offline map management"""
     queryset = OfflineMap.objects.all()
     serializer_class = OfflineMapSerializer
-    permission_classes = [IsAuthenticatedOrReadOnly]
+    permission_classes = [IsAgentOrAdminOrReadOnly]
     filter_backends = [DjangoFilterBackend, filters.OrderingFilter]
     filterset_fields = ['destination', 'is_active']
     ordering_fields = ['destination', 'created_at']
     ordering = ['-created_at']
 
     def perform_create(self, serializer):
-        serializer.save()
+        instance = serializer.save()
+        # Keep one active version per map title and destination.
+        if instance.is_active:
+            OfflineMap.objects.filter(
+                destination=instance.destination,
+                title=instance.title,
+                is_active=True,
+            ).exclude(id=instance.id).update(is_active=False)
+
+    @action(detail=False, methods=['get'])
+    def latest(self, request):
+        """Return latest active map versions by title for a destination."""
+        destination_id = request.query_params.get('destination')
+        if not destination_id:
+            return Response({'error': 'destination query param is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        maps = OfflineMap.objects.filter(destination_id=destination_id, is_active=True).order_by('title', '-created_at')
+        latest_maps = []
+        seen_titles = set()
+        for item in maps:
+            if item.title in seen_titles:
+                continue
+            seen_titles.add(item.title)
+            latest_maps.append(item)
+
+        serializer = OfflineMapSerializer(latest_maps, many=True)
+        return Response(serializer.data)
 
 
 class PackageViewSet(viewsets.ModelViewSet):
@@ -154,7 +182,7 @@ class PackageDepartureViewSet(viewsets.ModelViewSet):
     """ViewSet for package departure management"""
     queryset = PackageDeparture.objects.all()
     serializer_class = PackageDepartureSerializer
-    permission_classes = [IsAuthenticatedOrReadOnly]
+    permission_classes = [IsAgentOrAdminOrReadOnly]
     filter_backends = [DjangoFilterBackend, filters.OrderingFilter]
     filterset_fields = ['package', 'status']
     ordering_fields = ['departure_date']
@@ -210,7 +238,23 @@ class BookingViewSet(viewsets.ModelViewSet):
         return BookingListSerializer
 
     def perform_create(self, serializer):
-        serializer.save(tourist=self.request.user)
+        departure = serializer.validated_data.get('departure')
+        travelers_count = serializer.validated_data.get('travelers_count', 1)
+
+        with transaction.atomic():
+            if departure:
+                locked_departure = PackageDeparture.objects.select_for_update().get(id=departure.id)
+                if locked_departure.status != 'open':
+                    raise ValidationError({'departure_id': 'Selected departure is not open for booking.'})
+                if locked_departure.available_seats < travelers_count:
+                    raise ValidationError({'travelers_count': f'Only {locked_departure.available_seats} seats are available for this departure.'})
+
+                locked_departure.available_seats -= travelers_count
+                locked_departure.save(update_fields=['available_seats'])
+                serializer.save(tourist=self.request.user, departure=locked_departure)
+                return
+
+            serializer.save(tourist=self.request.user)
 
     @action(detail=True, methods=['get'])
     def payment_status(self, request, pk=None):
@@ -233,10 +277,89 @@ class BookingViewSet(viewsets.ModelViewSet):
                 {'error': 'You do not have permission to cancel this booking'},
                 status=status.HTTP_403_FORBIDDEN
             )
-        
-        booking.status = 'cancelled'
-        booking.save()
+
+        if booking.status == 'cancelled':
+            return Response({'message': 'Booking is already cancelled.'})
+
+        if booking.status == 'completed':
+            return Response(
+                {'error': 'Completed booking cannot be cancelled.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        if booking.departure and booking.departure.departure_date <= timezone.now().date() + timedelta(days=2):
+            return Response(
+                {'error': 'Cancellation is allowed only up to 2 days before departure.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        with transaction.atomic():
+            if booking.departure:
+                dep = PackageDeparture.objects.select_for_update().get(id=booking.departure_id)
+                dep.available_seats = min(dep.total_seats, dep.available_seats + booking.travelers_count)
+                dep.save(update_fields=['available_seats'])
+
+            booking.status = 'cancelled'
+            booking.save(update_fields=['status'])
         return Response({'message': 'Booking cancelled successfully'})
+
+    @action(detail=True, methods=['post'])
+    def reschedule(self, request, pk=None):
+        """Reschedule a booking to another departure of the same package."""
+        booking = self.get_object()
+        new_departure_id = request.data.get('new_departure_id')
+
+        if booking.tourist != request.user and request.user.profile.role not in ['admin', 'agent']:
+            return Response(
+                {'error': 'You do not have permission to reschedule this booking'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        if booking.status in ['cancelled', 'completed']:
+            return Response(
+                {'error': f'Cannot reschedule a {booking.status} booking.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        if not new_departure_id:
+            return Response({'error': 'new_departure_id is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            new_departure = PackageDeparture.objects.get(id=new_departure_id)
+        except PackageDeparture.DoesNotExist:
+            return Response({'error': 'New departure not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        if new_departure.package_id != booking.package_id:
+            return Response({'error': 'New departure must belong to the same package'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if new_departure.status != 'open':
+            return Response({'error': 'New departure is not open'}, status=status.HTTP_400_BAD_REQUEST)
+
+        with transaction.atomic():
+            current_dep = None
+            if booking.departure_id:
+                current_dep = PackageDeparture.objects.select_for_update().get(id=booking.departure_id)
+
+            new_dep_locked = PackageDeparture.objects.select_for_update().get(id=new_departure_id)
+
+            if new_dep_locked.available_seats < booking.travelers_count:
+                return Response(
+                    {'error': f'Only {new_dep_locked.available_seats} seats are available on selected departure'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            if current_dep:
+                current_dep.available_seats = min(current_dep.total_seats, current_dep.available_seats + booking.travelers_count)
+                current_dep.save(update_fields=['available_seats'])
+
+            new_dep_locked.available_seats -= booking.travelers_count
+            new_dep_locked.save(update_fields=['available_seats'])
+
+            booking.departure = new_dep_locked
+            booking.status = 'rescheduled'
+            booking.save(update_fields=['departure', 'status'])
+
+        return Response({'message': 'Booking rescheduled successfully', 'booking': BookingDetailSerializer(booking).data})
 
     @action(detail=True, methods=['post'])
     def confirm(self, request, pk=None):

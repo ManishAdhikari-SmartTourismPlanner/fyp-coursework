@@ -12,8 +12,13 @@ import {
   fetchPackageDetail,
   updatePackage,
   deletePackage,
+  createPackageDeparture,
   fetchAllBookings,
   fetchAllPayments,
+  fetchOfflineMaps,
+  createOfflineMap,
+  updateOfflineMap,
+  deleteOfflineMap,
   confirmBooking,
   cancelBooking,
 } from '../services/tourism'
@@ -25,6 +30,7 @@ export default function AgentDashboard() {
   const [packages, setPackages] = useState([])
   const [bookings, setBookings] = useState([])
   const [payments, setPayments] = useState([])
+  const [offlineMaps, setOfflineMaps] = useState([])
   const [loadingPage, setLoadingPage] = useState(true)
   const [error, setError] = useState('')
   const [processingBookingId, setProcessingBookingId] = useState(null)
@@ -36,6 +42,11 @@ export default function AgentDashboard() {
   const [packageMessage, setPackageMessage] = useState('')
   const [savingPackage, setSavingPackage] = useState(false)
   const [editingPackageId, setEditingPackageId] = useState(null)
+  const [departureMessage, setDepartureMessage] = useState('')
+  const [savingDeparture, setSavingDeparture] = useState(false)
+  const [mapMessage, setMapMessage] = useState('')
+  const [savingMap, setSavingMap] = useState(false)
+  const [editingMapId, setEditingMapId] = useState(null)
   const [destinationForm, setDestinationForm] = useState({
     name: '',
     slug: '',
@@ -64,6 +75,20 @@ export default function AgentDashboard() {
     includes: '',
     excludes: '',
     itinerary_overview: '',
+    is_active: true,
+  })
+  const [departureForm, setDepartureForm] = useState({
+    package_id: '',
+    departure_date: '',
+    total_seats: 10,
+    status: 'open',
+  })
+  const [mapForm, setMapForm] = useState({
+    destination_id: '',
+    title: '',
+    file_url: '',
+    version: 'v1',
+    file_size_mb: 0,
     is_active: true,
   })
 
@@ -95,20 +120,23 @@ export default function AgentDashboard() {
     setLoadingPage(true)
     setError('')
     try {
-      const [destsData, pkgsData, bksData, pmsData] = await Promise.all([
+      const [destsData, pkgsData, bksData, pmsData, mapsData] = await Promise.all([
         fetchDestinations(),
         fetchPackages(),
         fetchAllBookings(),
         fetchAllPayments(),
+        fetchOfflineMaps(),
       ])
 
       const dests = await loadAllPages(fetchDestinations, destsData)
       const pkgs = await loadAllPages(fetchPackages, pkgsData)
+      const maps = await loadAllPages(fetchOfflineMaps, mapsData)
       const bks = Array.isArray(bksData) ? bksData : bksData.results || bksData
       const pms = Array.isArray(pmsData) ? pmsData : pmsData.results || pmsData
 
       setDestinations(dests)
       setPackages(pkgs)
+      setOfflineMaps(maps)
       setBookings(bks)
       setPayments(pms)
     } catch (err) {
@@ -176,6 +204,40 @@ export default function AgentDashboard() {
   function updatePackageField(e) {
     const { name, value, type, checked } = e.target
     setPackageForm((prev) => ({
+      ...prev,
+      [name]: type === 'checkbox' ? checked : value,
+    }))
+  }
+
+  function updateDepartureField(e) {
+    const { name, value } = e.target
+    setDepartureForm((prev) => ({ ...prev, [name]: value }))
+  }
+
+  function resetDepartureForm() {
+    setDepartureForm({
+      package_id: '',
+      departure_date: '',
+      total_seats: 10,
+      status: 'open',
+    })
+  }
+
+  function resetMapForm() {
+    setEditingMapId(null)
+    setMapForm({
+      destination_id: '',
+      title: '',
+      file_url: '',
+      version: 'v1',
+      file_size_mb: 0,
+      is_active: true,
+    })
+  }
+
+  function updateMapField(e) {
+    const { name, value, type, checked } = e.target
+    setMapForm((prev) => ({
       ...prev,
       [name]: type === 'checkbox' ? checked : value,
     }))
@@ -334,6 +396,97 @@ export default function AgentDashboard() {
       setError(err.message || 'Failed to delete package.')
     } finally {
       setProcessingPackageId(null)
+    }
+  }
+
+  async function handleSubmitDeparture(e) {
+    e.preventDefault()
+    setSavingDeparture(true)
+    setError('')
+    setDepartureMessage('')
+
+    const payload = {
+      package_id: Number(departureForm.package_id),
+      departure_date: departureForm.departure_date,
+      total_seats: Number(departureForm.total_seats || 1),
+      status: departureForm.status || 'open',
+    }
+
+    try {
+      await createPackageDeparture(payload)
+      setDepartureMessage('Departure created successfully.')
+      resetDepartureForm()
+      await loadAgentData()
+    } catch (err) {
+      setError(err.message || 'Failed to create departure.')
+    } finally {
+      setSavingDeparture(false)
+    }
+  }
+
+  function handleEditMap(mapRow) {
+    setMapMessage('')
+    setError('')
+    setEditingMapId(mapRow.id)
+    setMapForm({
+      destination_id: mapRow.destination || '',
+      title: mapRow.title || '',
+      file_url: mapRow.file_url || '',
+      version: mapRow.version || 'v1',
+      file_size_mb: mapRow.file_size_mb || 0,
+      is_active: mapRow.is_active !== false,
+    })
+  }
+
+  async function handleSubmitMap(e) {
+    e.preventDefault()
+    setSavingMap(true)
+    setError('')
+    setMapMessage('')
+
+    const payload = {
+      destination_id: Number(mapForm.destination_id),
+      title: mapForm.title,
+      file_url: mapForm.file_url,
+      version: mapForm.version,
+      file_size_mb: Number(mapForm.file_size_mb || 0),
+      is_active: mapForm.is_active,
+    }
+
+    try {
+      if (editingMapId) {
+        await updateOfflineMap(editingMapId, payload)
+        setMapMessage('Offline map updated successfully.')
+      } else {
+        await createOfflineMap(payload)
+        setMapMessage('Offline map created successfully.')
+      }
+      resetMapForm()
+      await loadAgentData()
+    } catch (err) {
+      setError(err.message || 'Failed to save offline map.')
+    } finally {
+      setSavingMap(false)
+    }
+  }
+
+  async function handleDeleteMap(mapId) {
+    const ok = window.confirm('Are you sure you want to delete this offline map version?')
+    if (!ok) {
+      return
+    }
+
+    setError('')
+    setMapMessage('')
+    try {
+      await deleteOfflineMap(mapId)
+      if (editingMapId === mapId) {
+        resetMapForm()
+      }
+      setMapMessage('Offline map deleted successfully.')
+      await loadAgentData()
+    } catch (err) {
+      setError(err.message || 'Failed to delete offline map.')
     }
   }
 
@@ -496,6 +649,14 @@ export default function AgentDashboard() {
               <span className="nav-badge">{bookingStats.total}</span>
             </button>
             <button
+              className={`nav-item ${activeTab === 'maps' ? 'active' : ''}`}
+              onClick={() => setActiveTab('maps')}
+            >
+              <span className="nav-icon"></span>
+              <span className="nav-label">Offline Maps</span>
+              <span className="nav-badge">{offlineMaps.length}</span>
+            </button>
+            <button
               className={`nav-item ${activeTab === 'analytics' ? 'active' : ''}`}
               onClick={() => setActiveTab('analytics')}
             >
@@ -596,6 +757,9 @@ export default function AgentDashboard() {
                     </button>
                     <button className="btn-outline" onClick={() => setActiveTab('bookings')}>
                       View Bookings
+                    </button>
+                    <button className="btn-outline" onClick={() => setActiveTab('maps')}>
+                      Manage Offline Maps
                     </button>
                   </div>
                 </div>
@@ -783,6 +947,7 @@ export default function AgentDashboard() {
                       <div className="form-group">
                         <label>Package Type</label>
                         <select name="package_type" value={packageForm.package_type} onChange={updatePackageField}>
+                          <option value="normal">Normal</option>
                           <option value="standard">Standard</option>
                           <option value="deluxe">Deluxe</option>
                         </select>
@@ -851,6 +1016,49 @@ export default function AgentDashboard() {
                           Cancel
                         </button>
                       )}
+                    </div>
+                  </form>
+
+                  <hr style={{ margin: '20px 0', opacity: 0.2 }} />
+                  <h3>New Departure</h3>
+                  {departureMessage && <div className="alert alert-success">{departureMessage}</div>}
+                  <form className="modern-form" onSubmit={handleSubmitDeparture}>
+                    <div className="form-group">
+                      <label>Package</label>
+                      <select name="package_id" value={departureForm.package_id} onChange={updateDepartureField} required>
+                        <option value="">Select a package</option>
+                        {packages.map((p) => (
+                          <option key={p.id} value={p.id}>
+                            {p.title}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <div className="form-row">
+                      <div className="form-group">
+                        <label>Departure Date</label>
+                        <input name="departure_date" type="date" value={departureForm.departure_date} onChange={updateDepartureField} required />
+                      </div>
+                      <div className="form-group">
+                        <label>Total Seats</label>
+                        <input name="total_seats" type="number" min="1" value={departureForm.total_seats} onChange={updateDepartureField} required />
+                      </div>
+                    </div>
+
+                    <div className="form-group">
+                      <label>Status</label>
+                      <select name="status" value={departureForm.status} onChange={updateDepartureField}>
+                        <option value="open">Open</option>
+                        <option value="closed">Closed</option>
+                        <option value="cancelled">Cancelled</option>
+                      </select>
+                    </div>
+
+                    <div className="form-actions">
+                      <button className="btn-primary" type="submit" disabled={savingDeparture}>
+                        {savingDeparture ? 'Saving...' : 'Create Departure'}
+                      </button>
                     </div>
                   </form>
                 </div>
@@ -961,6 +1169,110 @@ export default function AgentDashboard() {
                     </table>
                   </div>
                 )}
+              </div>
+            </div>
+          )}
+
+          {/* OFFLINE MAPS TAB */}
+          {activeTab === 'maps' && (
+            <div className="agent-content">
+              <div className="content-header">
+                <h1>Manage Offline Maps</h1>
+                <p>Create versioned offline map packs for destinations. Tourists can only view and download active versions.</p>
+              </div>
+
+              <div className="content-grid">
+                <div className="card form-card">
+                  <h3>{editingMapId ? 'Edit Offline Map' : 'New Offline Map'}</h3>
+                  {mapMessage && <div className="alert alert-success">{mapMessage}</div>}
+                  <form className="modern-form" onSubmit={handleSubmitMap}>
+                    <div className="form-group">
+                      <label>Destination</label>
+                      <select name="destination_id" value={mapForm.destination_id} onChange={updateMapField} required>
+                        <option value="">Select a destination</option>
+                        {destinations.map((d) => (
+                          <option key={d.id} value={d.id}>{d.name}</option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <div className="form-group">
+                      <label>Map Title</label>
+                      <input name="title" value={mapForm.title} onChange={updateMapField} placeholder="Trail map or city guide" required />
+                    </div>
+
+                    <div className="form-group">
+                      <label>File URL</label>
+                      <input name="file_url" value={mapForm.file_url} onChange={updateMapField} placeholder="https://..." required />
+                    </div>
+
+                    <div className="form-row">
+                      <div className="form-group">
+                        <label>Version</label>
+                        <input name="version" value={mapForm.version} onChange={updateMapField} placeholder="v1" required />
+                      </div>
+                      <div className="form-group">
+                        <label>File Size (MB)</label>
+                        <input name="file_size_mb" type="number" min="0" step="0.01" value={mapForm.file_size_mb} onChange={updateMapField} required />
+                      </div>
+                    </div>
+
+                    <div className="form-checkbox">
+                      <input id="map-active" name="is_active" type="checkbox" checked={mapForm.is_active} onChange={updateMapField} />
+                      <label htmlFor="map-active">Active Version</label>
+                    </div>
+
+                    <div className="form-actions">
+                      <button className="btn-primary" type="submit" disabled={savingMap}>
+                        {savingMap ? 'Saving...' : (editingMapId ? 'Update Offline Map' : 'Create Offline Map')}
+                      </button>
+                      {editingMapId && (
+                        <button className="btn-secondary" type="button" onClick={resetMapForm}>
+                          Cancel
+                        </button>
+                      )}
+                    </div>
+                  </form>
+                </div>
+
+                <div className="card list-card">
+                  <h3>All Offline Maps ({offlineMaps.length})</h3>
+                  {offlineMaps.length === 0 ? (
+                    <p className="empty-state">No offline maps yet. Add your first map pack.</p>
+                  ) : (
+                    <div className="modern-table-wrapper">
+                      <table className="modern-table">
+                        <thead>
+                          <tr>
+                            <th>Destination</th>
+                            <th>Title</th>
+                            <th>Version</th>
+                            <th>Size</th>
+                            <th>Status</th>
+                            <th>Actions</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {offlineMaps.map((m) => (
+                            <tr key={m.id}>
+                              <td>{m.destination_name}</td>
+                              <td>{m.title}</td>
+                              <td>{m.version}</td>
+                              <td>{m.file_size_mb} MB</td>
+                              <td><span className={`badge badge-${m.is_active ? 'success' : 'muted'}`}>{m.is_active ? 'Active' : 'Inactive'}</span></td>
+                              <td>
+                                <div className="action-buttons-compact">
+                                  <button className="btn-icon btn-edit" onClick={() => handleEditMap(m)} title="Edit Offline Map">Edit</button>
+                                  <button className="btn-icon btn-delete" onClick={() => handleDeleteMap(m.id)} title="Delete Offline Map">Delete</button>
+                                </div>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
           )}

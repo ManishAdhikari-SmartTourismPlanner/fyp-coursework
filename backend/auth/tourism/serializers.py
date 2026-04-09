@@ -61,11 +61,30 @@ class DestinationDetailSerializer(serializers.ModelSerializer):
 
 class OfflineMapSerializer(serializers.ModelSerializer):
     destination_name = serializers.CharField(source='destination.name', read_only=True)
+    destination = serializers.IntegerField(source='destination.id', read_only=True)
+    destination_id = serializers.IntegerField(write_only=True, required=False)
 
     class Meta:
         model = OfflineMap
-        fields = ['id', 'destination_name', 'title', 'file_url', 'version', 'file_size_mb', 'is_active']
+        fields = ['id', 'destination', 'destination_name', 'destination_id', 'title', 'file_url', 'version', 'file_size_mb', 'is_active']
         read_only_fields = ['id', 'created_at', 'updated_at']
+
+    def create(self, validated_data):
+        destination_id = validated_data.pop('destination_id', None)
+        if destination_id is not None:
+            validated_data['destination_id'] = destination_id
+        return OfflineMap.objects.create(**validated_data)
+
+    def update(self, instance, validated_data):
+        destination_id = validated_data.pop('destination_id', None)
+        if destination_id is not None:
+            instance.destination_id = destination_id
+
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+
+        instance.save()
+        return instance
 
 
 class PackageListSerializer(serializers.ModelSerializer):
@@ -114,13 +133,20 @@ class PackageDetailSerializer(serializers.ModelSerializer):
 
     def validate(self, attrs):
         destination_id = attrs.get('destination_id')
+        package_type = attrs.get('package_type')
         if destination_id is None and self.instance is not None:
             destination_id = self.instance.destination_id
+        if package_type is None and self.instance is not None:
+            package_type = self.instance.package_type
 
         if destination_id is not None:
             existing = Package.objects.filter(destination_id=destination_id)
             if self.instance is not None:
                 existing = existing.exclude(id=self.instance.id)
+
+            if package_type and existing.filter(package_type=package_type).exists():
+                raise serializers.ValidationError({'package_type': 'This destination already has this package type. Use one each of normal, standard, and deluxe.'})
+
             if existing.count() >= 3:
                 raise serializers.ValidationError({'destination_id': 'A maximum of 3 packages is allowed per destination.'})
 
@@ -142,18 +168,40 @@ class PackageDetailSerializer(serializers.ModelSerializer):
 
 class PackageDepartureSerializer(serializers.ModelSerializer):
     package_title = serializers.CharField(source='package.title', read_only=True)
+    package_id = serializers.IntegerField(write_only=True, required=False)
     seats_available = serializers.SerializerMethodField()
 
     class Meta:
         model = PackageDeparture
         fields = [
-            'id', 'package_title', 'departure_date', 'total_seats',
+            'id', 'package_title', 'package_id', 'departure_date', 'total_seats',
             'available_seats', 'seats_available', 'status'
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
 
     def get_seats_available(self, obj):
         return obj.available_seats > 0
+
+    def create(self, validated_data):
+        package_id = validated_data.pop('package_id', None)
+        if package_id is not None:
+            validated_data['package_id'] = package_id
+
+        if 'available_seats' not in validated_data:
+            validated_data['available_seats'] = validated_data.get('total_seats', 1)
+
+        return PackageDeparture.objects.create(**validated_data)
+
+    def update(self, instance, validated_data):
+        package_id = validated_data.pop('package_id', None)
+        if package_id is not None:
+            instance.package_id = package_id
+
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+
+        instance.save()
+        return instance
 
 
 class BookingListSerializer(serializers.ModelSerializer):

@@ -168,31 +168,31 @@ for dest in seeded_destinations:
     # Base price calculation
     base_price = 45000 + (dest.altitude_m // 100) * 100
     
-    # Budget package - 60% of standard
-    budget, created = Package.objects.get_or_create(
-        title=f"{dest.name} - Budget Package",
+    # Normal package - 60% of standard
+    normal, created = Package.objects.get_or_create(
+        title=f"{dest.name} - Normal Package",
         destination=dest,
-        package_type='budget',
+        package_type='normal',
         defaults={
-            'slug': f"{dest.slug}-budget",
-            'description': f"Economical {dest.name} experience for budget-conscious travelers. Basic comfort with essential services and experienced guides.",
+            'slug': f"{dest.slug}-normal",
+            'description': f"Balanced and economical {dest.name} experience with essential services and reliable local support.",
             'tour_type': dest.tour_type,
             'duration_days': dest.suggested_duration_days,
             'max_group_size': 20,
             'price_npr': int(base_price * 0.6),
             'includes': " Local English-speaking guide  Basic meals (breakfast & dinner)  Budget lodges & guesthouses  Park entry fees  Shared transport  Basic first-aid",
             'excludes': " International flights  Visa fees  Lunch  Alcohol & premium drinks  Tips  Personal equipment  Travel insurance  Optional activities",
-            'itinerary_overview': f"Budget-friendly journey through {dest.name}. Experience the destination authentically with basic but reliable facilities and local guides.",
+            'itinerary_overview': f"Comfortable and value-focused journey through {dest.name} with practical facilities and trusted local guides.",
             'is_active': True,
             'created_by': admin_user,
         }
     )
-    if not budget.is_active:
-        budget.is_active = True
-        budget.save(update_fields=['is_active'])
+    if not normal.is_active:
+        normal.is_active = True
+        normal.save(update_fields=['is_active'])
     if created:
         pkg_count += 1
-        print(f" Created: {budget.title}")
+        print(f" Created: {normal.title}")
 
     # Standard package
     standard, created = Package.objects.get_or_create(
