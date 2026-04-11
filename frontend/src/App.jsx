@@ -14,6 +14,7 @@ import OfflineMapsPage from './pages/OfflineMapsPage'
 import ESewaSuccessPage from './pages/ESewaSuccessPage'
 import ESewaFailurePage from './pages/ESewaFailurePage'
 import MockESewaPayment from './pages/MockESewaPayment'
+import KhaltiSuccessPage from './pages/KhaltiSuccessPage'
 import './App.css'
 
 function App() {
@@ -40,6 +41,7 @@ function App() {
       <Route path="/payment/esewa-success" element={<ESewaSuccessPage />} />
       <Route path="/payment/esewa-failure" element={<ESewaFailurePage />} />
       <Route path="/payment/mock-esewa" element={<MockESewaPayment />} />
+      <Route path="/payment/khalti-success" element={<KhaltiSuccessPage />} />
       
       {/* Role-based Dashboards */}
       <Route path="/tourist" element={<ProtectedRoute role="tourist"><TouristDashboard /></ProtectedRoute>} />

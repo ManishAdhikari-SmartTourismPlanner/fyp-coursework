@@ -1,8 +1,10 @@
 from django.contrib.auth.models import User
+from django.core import mail
 from rest_framework import status
 from rest_framework.test import APITestCase
+import re
 
-from users.models import UserProfile
+from users.models import LoginOTPChallenge, UserProfile
 
 
 class AuthApiTests(APITestCase):
@@ -38,11 +40,80 @@ class AuthApiTests(APITestCase):
 		response = self.client.post('/api/auth/login/', payload, format='json')
 
 		self.assertEqual(response.status_code, status.HTTP_200_OK)
+		self.assertTrue(response.data.get('otp_required'))
+		self.assertIn('challenge_id', response.data)
+
+		challenge_id = response.data['challenge_id']
+		self.assertEqual(len(mail.outbox), 1)
+		match = re.search(r'OTP\) is: (\d{6})', mail.outbox[0].body)
+		self.assertIsNotNone(match)
+		otp_code = match.group(1)
+
+		verify_response = self.client.post(
+			'/api/auth/verify-otp/',
+			{'challenge_id': challenge_id, 'code': otp_code},
+			format='json',
+		)
+
+		self.assertEqual(verify_response.status_code, status.HTTP_200_OK)
+		self.assertIn('access', verify_response.data)
+		self.assertIn('refresh', verify_response.data)
+		self.assertIn('user', verify_response.data)
+		self.assertEqual(verify_response.data['user']['username'], 'login_user')
+		self.assertEqual(verify_response.data['user']['role'], UserProfile.ROLE_TOURIST)
+
+	def test_agent_login_still_returns_tokens_without_otp(self):
+		user = User.objects.create_user(
+			username='agent_user',
+			email='agent@example.com',
+			password='Pass12345!',
+		)
+		user.profile.role = UserProfile.ROLE_AGENT
+		user.profile.save(update_fields=['role'])
+
+		response = self.client.post(
+			'/api/auth/login/',
+			{'username': 'agent_user', 'password': 'Pass12345!'},
+			format='json',
+		)
+
+		self.assertEqual(response.status_code, status.HTTP_200_OK)
 		self.assertIn('access', response.data)
 		self.assertIn('refresh', response.data)
-		self.assertIn('user', response.data)
-		self.assertEqual(response.data['user']['username'], 'login_user')
-		self.assertEqual(response.data['user']['role'], UserProfile.ROLE_TOURIST)
+		self.assertEqual(response.data['user']['role'], UserProfile.ROLE_AGENT)
+
+	def test_tourist_otp_allows_only_five_attempts(self):
+		user = User.objects.create_user(
+			username='otp_user',
+			email='otp@example.com',
+			password='Pass12345!',
+		)
+		user.profile.role = UserProfile.ROLE_TOURIST
+		user.profile.save(update_fields=['role'])
+
+		login_response = self.client.post(
+			'/api/auth/login/',
+			{'username': 'otp_user', 'password': 'Pass12345!'},
+			format='json',
+		)
+		challenge_id = login_response.data['challenge_id']
+
+		for _ in range(5):
+			bad_response = self.client.post(
+				'/api/auth/verify-otp/',
+				{'challenge_id': challenge_id, 'code': '000000'},
+				format='json',
+			)
+			self.assertEqual(bad_response.status_code, status.HTTP_400_BAD_REQUEST)
+
+		locked_response = self.client.post(
+			'/api/auth/verify-otp/',
+			{'challenge_id': challenge_id, 'code': '000000'},
+			format='json',
+		)
+		self.assertEqual(locked_response.status_code, status.HTTP_400_BAD_REQUEST)
+		challenge = LoginOTPChallenge.objects.get(id=challenge_id)
+		self.assertTrue(challenge.is_used)
 
 	def test_me_requires_auth_and_returns_current_user(self):
 		user = User.objects.create_user(
@@ -76,6 +147,8 @@ class AuthApiTests(APITestCase):
 			email='logout@example.com',
 			password='Pass12345!',
 		)
+		user.profile.role = UserProfile.ROLE_AGENT
+		user.profile.save(update_fields=['role'])
 
 		login_response = self.client.post(
 			'/api/auth/login/',

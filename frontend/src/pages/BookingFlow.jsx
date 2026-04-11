@@ -1,6 +1,6 @@
-﻿import { useState } from 'react'
+﻿import { useEffect, useMemo, useState } from 'react'
 import { useNavigate, useLocation } from 'react-router-dom'
-import { createBooking, createPayment, initiateESewaPayment } from '../services/tourism'
+import { createBooking, initiateESewaPayment, initiateKhaltiPayment, cancelBooking } from '../services/tourism'
 import { useAuth } from '../context/AuthContext'
 
 export default function BookingFlowPage() {
@@ -23,14 +23,56 @@ export default function BookingFlowPage() {
   const [error, setError] = useState('')
   const [bookingCode, setBookingCode] = useState('')
   const [bookingId, setBookingId] = useState(null)
-  const [transactionId, setTransactionId] = useState('')
+  const [paymentDueAt, setPaymentDueAt] = useState('')
+  const [nowMs, setNowMs] = useState(Date.now())
 
   const [booking, setBooking] = useState({
     special_request: '',
-    payment_method: 'khalti', // khalti, esewa, cash
+    payment_method: 'khalti',
   })
 
   const totalAmount = price * travelersCount
+
+  useEffect(() => {
+    if (!paymentDueAt || step === 'confirmation') {
+      return undefined
+    }
+
+    const id = window.setInterval(() => {
+      setNowMs(Date.now())
+    }, 1000)
+
+    return () => window.clearInterval(id)
+  }, [paymentDueAt, step])
+
+  const remainingMs = useMemo(() => {
+    if (!paymentDueAt) {
+      return 0
+    }
+    const due = new Date(paymentDueAt).getTime()
+    return Math.max(0, due - nowMs)
+  }, [paymentDueAt, nowMs])
+
+  const isPaymentExpired = Boolean(paymentDueAt) && remainingMs <= 0
+  const remainingMinutes = Math.floor(remainingMs / 60000)
+  const remainingSeconds = Math.floor((remainingMs % 60000) / 1000)
+
+  useEffect(() => {
+    async function expireIfNeeded() {
+      if (!isPaymentExpired || !bookingId || step === 'confirmation') {
+        return
+      }
+      setError('Payment window expired. Your booking has been cancelled automatically.')
+      try {
+        await cancelBooking(bookingId)
+      } catch {
+        // Backend may have already auto-cancelled.
+      }
+      setStep('details')
+    }
+
+    expireIfNeeded()
+  }, [isPaymentExpired, bookingId, step])
 
   async function handleCreateBooking() {
     setLoading(true)
@@ -48,13 +90,8 @@ export default function BookingFlowPage() {
       setBookingCode(result.booking_code)
       setBookingId(result.id)
       
-      if (booking.payment_method === 'cash') {
-        // For cash, move to confirmation
-        setStep('confirmation')
-      } else {
-        // For online payments, move to payment step
-        setStep('payment')
-      }
+      setPaymentDueAt(result.payment_due_at || '')
+      setStep('payment')
     } catch (err) {
       setError(err.message || 'Failed to create booking')
     } finally {
@@ -63,8 +100,12 @@ export default function BookingFlowPage() {
   }
 
   async function handleProcessPayment() {
-    // For eSewa, redirect to payment gateway
     if (booking.payment_method === 'esewa') {
+      if (isPaymentExpired) {
+        setError('Payment window has expired. Please create a new booking.')
+        return
+      }
+
       if (!bookingId) {
         setError('Booking ID not found. Please try again.')
         return
@@ -93,27 +134,54 @@ export default function BookingFlowPage() {
       return
     }
 
-    // For manual payments (Khalti, etc.)
-    if (!transactionId) {
-      setError('Please enter transaction ID')
+    // Khalti hosted checkout flow
+    if (isPaymentExpired) {
+      setError('Payment window has expired. Please create a new booking.')
+      return
+    }
+
+    if (!bookingId) {
+      setError('Booking ID not found. Please try again.')
       return
     }
 
     setLoading(true)
     setError('')
     try {
-      const payload = {
-        booking_code: bookingCode,
-        method: booking.payment_method,
-        transaction_id: transactionId,
-        amount_npr: totalAmount,
-        status: 'pending',
+      const result = await initiateKhaltiPayment(bookingId, totalAmount)
+      if (result.payment_url) {
+        window.location.href = result.payment_url
+      } else {
+        setError('Failed to start Khalti payment. Please try again.')
       }
-      
-      await createPayment(payload)
-      setStep('confirmation')
     } catch (err) {
       setError(err.message || 'Failed to process payment')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  async function handleManualCancel() {
+    if (!bookingId) {
+      return
+    }
+
+    if (isPaymentExpired) {
+      setError('Payment window has already expired.')
+      return
+    }
+
+    setLoading(true)
+    setError('')
+    try {
+      await cancelBooking(bookingId)
+      setError('Booking cancelled successfully within 5-minute payment window.')
+      setStep('details')
+      setBookingCode('')
+      setBookingId(null)
+      setPaymentDueAt('')
+    } catch (err) {
+      setError(err.message || 'Failed to cancel booking')
     } finally {
       setLoading(false)
     }
@@ -194,7 +262,6 @@ export default function BookingFlowPage() {
                   >
                     <option value="khalti">Khalti (Online)</option>
                     <option value="esewa">eSewa (Online)</option>
-                    <option value="cash">Cash at Counter</option>
                   </select>
                 </div>
 
@@ -223,6 +290,12 @@ export default function BookingFlowPage() {
             <div className="booking-form-section">
               <div className="form-card">
                 <h3> Payment Information</h3>
+
+                <div className={`alert ${isPaymentExpired ? 'alert-error' : 'alert-success'}`} style={{ marginBottom: '12px' }}>
+                  {isPaymentExpired
+                    ? 'Payment window expired.'
+                    : `Complete payment in ${String(remainingMinutes).padStart(2, '0')}:${String(remainingSeconds).padStart(2, '0')} (mm:ss)`}
+                </div>
                 
                 <div className="booking-summary">
                   <div className="summary-item">
@@ -240,12 +313,10 @@ export default function BookingFlowPage() {
                   </h4>
                   {booking.payment_method === 'khalti' && (
                     <ol>
-                      <li>Open Khalti app or visit khalti.com</li>
-                      <li>Select "Send Money"</li>
-                      <li>Enter amount: NPR {totalAmount}</li>
-                      <li>Select Smart Tourism Planner as recipient</li>
-                      <li>Complete the payment</li>
-                      <li>Paste the transaction ID below</li>
+                      <li>Click "Pay with Khalti" button below</li>
+                      <li>You will be redirected to official Khalti payment page</li>
+                      <li>Enter your Khalti PIN/MPIN on Khalti securely</li>
+                      <li>After payment, you will return to this app automatically</li>
                     </ol>
                   )}
                   {booking.payment_method === 'esewa' && (
@@ -259,23 +330,17 @@ export default function BookingFlowPage() {
                   )}
                 </div>
 
-                {booking.payment_method === 'khalti' && (
-                  <div className="form-group">
-                    <label htmlFor="transaction_id">Transaction ID / Reference Number</label>
-                    <input
-                      id="transaction_id"
-                      type="text"
-                      value={transactionId}
-                      onChange={(e) => setTransactionId(e.target.value)}
-                      placeholder="e.g., KHA123456789"
-                      className="form-control"
-                    />
-                  </div>
-                )}
-
                 {error && <p className="alert alert-error">{error}</p>}
 
                 <div className="button-group">
+                  <button
+                    className="btn-secondary"
+                    onClick={handleManualCancel}
+                    disabled={loading || isPaymentExpired}
+                    type="button"
+                  >
+                    Cancel Booking
+                  </button>
                   <button
                     className="btn-secondary"
                     onClick={() => setStep('details')}
@@ -286,9 +351,9 @@ export default function BookingFlowPage() {
                   <button
                     className="btn-primary"
                     onClick={handleProcessPayment}
-                    disabled={loading}
+                    disabled={loading || isPaymentExpired}
                   >
-                    {loading ? 'Processing...' : booking.payment_method === 'esewa' ? 'Pay with eSewa' : 'Confirm Payment'}
+                    {loading ? 'Processing...' : booking.payment_method === 'esewa' ? 'Pay with eSewa' : 'Pay with Khalti'}
                   </button>
                 </div>
               </div>

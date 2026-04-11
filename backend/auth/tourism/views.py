@@ -9,6 +9,7 @@ from django.urls import reverse
 from django.conf import settings
 from django.db import transaction
 from datetime import timedelta
+from uuid import uuid4
 
 from .models import (
     Destination, OfflineMap, Package, PackageDeparture,
@@ -21,6 +22,55 @@ from .serializers import (
     PaymentSerializer, ReviewSerializer
 )
 from .esewa_gateway import ESewaPaymentGateway
+from .khalti_gateway import KhaltiPaymentGateway
+
+
+def _release_booking_seats(booking):
+    if not booking.departure_id:
+        return
+
+    dep = PackageDeparture.objects.select_for_update().get(id=booking.departure_id)
+    dep.available_seats = min(dep.total_seats, dep.available_seats + booking.travelers_count)
+    dep.save(update_fields=['available_seats'])
+
+
+def _expire_pending_booking_if_needed(booking):
+    if booking.status != Booking.STATUS_PENDING:
+        return False
+
+    if not booking.payment_due_at:
+        booking.payment_due_at = booking.booking_date + timedelta(minutes=Booking.PAYMENT_WINDOW_MINUTES)
+        booking.save(update_fields=['payment_due_at'])
+
+    if booking.payment_due_at and timezone.now() > booking.payment_due_at:
+        with transaction.atomic():
+            booking_locked = Booking.objects.select_for_update().get(id=booking.id)
+            if booking_locked.status != Booking.STATUS_PENDING:
+                return False
+            _release_booking_seats(booking_locked)
+            booking_locked.status = Booking.STATUS_CANCELLED
+            booking_locked.cancellation_reason = Booking.CANCEL_REASON_TIMEOUT
+            booking_locked.save(update_fields=['status', 'cancellation_reason'])
+        return True
+
+    return False
+
+
+def _expire_pending_bookings_for_queryset(queryset):
+    now = timezone.now()
+    expired_ids = list(
+        queryset.filter(status=Booking.STATUS_PENDING, payment_due_at__lt=now).values_list('id', flat=True)
+    )
+
+    if not expired_ids:
+        return
+
+    for booking_id in expired_ids:
+        try:
+            booking = Booking.objects.get(id=booking_id)
+            _expire_pending_booking_if_needed(booking)
+        except Booking.DoesNotExist:
+            continue
 
 
 class IsAgentOrAdminOrReadOnly(BasePermission):
@@ -226,8 +276,12 @@ class BookingViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         user = self.request.user
         if user.profile.role in ['agent', 'admin']:
+            queryset = Booking.objects.all()
+            _expire_pending_bookings_for_queryset(queryset)
             return Booking.objects.all()
         # Tourists only see their own bookings
+        queryset = Booking.objects.filter(tourist=user)
+        _expire_pending_bookings_for_queryset(queryset)
         return Booking.objects.filter(tourist=user)
 
     def get_serializer_class(self):
@@ -251,15 +305,25 @@ class BookingViewSet(viewsets.ModelViewSet):
 
                 locked_departure.available_seats -= travelers_count
                 locked_departure.save(update_fields=['available_seats'])
-                serializer.save(tourist=self.request.user, departure=locked_departure)
+                serializer.save(
+                    tourist=self.request.user,
+                    departure=locked_departure,
+                    status=Booking.STATUS_PENDING,
+                    payment_due_at=timezone.now() + timedelta(minutes=Booking.PAYMENT_WINDOW_MINUTES),
+                )
                 return
 
-            serializer.save(tourist=self.request.user)
+            serializer.save(
+                tourist=self.request.user,
+                status=Booking.STATUS_PENDING,
+                payment_due_at=timezone.now() + timedelta(minutes=Booking.PAYMENT_WINDOW_MINUTES),
+            )
 
     @action(detail=True, methods=['get'])
     def payment_status(self, request, pk=None):
         """Get payment status for a booking"""
         booking = self.get_object()
+        _expire_pending_booking_if_needed(booking)
         if hasattr(booking, 'payment'):
             serializer = PaymentSerializer(booking.payment)
             return Response(serializer.data)
@@ -281,6 +345,20 @@ class BookingViewSet(viewsets.ModelViewSet):
         if booking.status == 'cancelled':
             return Response({'message': 'Booking is already cancelled.'})
 
+        if booking.status == Booking.STATUS_PENDING:
+            if _expire_pending_booking_if_needed(booking):
+                return Response({'message': 'Booking cancelled due to payment timeout.'})
+
+            if booking.payment_due_at and timezone.now() <= booking.payment_due_at:
+                with transaction.atomic():
+                    booking_locked = Booking.objects.select_for_update().get(id=booking.id)
+                    if booking_locked.status == Booking.STATUS_PENDING:
+                        _release_booking_seats(booking_locked)
+                        booking_locked.status = Booking.STATUS_CANCELLED
+                        booking_locked.cancellation_reason = Booking.CANCEL_REASON_USER
+                        booking_locked.save(update_fields=['status', 'cancellation_reason'])
+                        return Response({'message': 'Booking cancelled successfully within payment window.'})
+
         if booking.status == 'completed':
             return Response(
                 {'error': 'Completed booking cannot be cancelled.'},
@@ -295,12 +373,11 @@ class BookingViewSet(viewsets.ModelViewSet):
 
         with transaction.atomic():
             if booking.departure:
-                dep = PackageDeparture.objects.select_for_update().get(id=booking.departure_id)
-                dep.available_seats = min(dep.total_seats, dep.available_seats + booking.travelers_count)
-                dep.save(update_fields=['available_seats'])
+                _release_booking_seats(booking)
 
             booking.status = 'cancelled'
-            booking.save(update_fields=['status'])
+            booking.cancellation_reason = Booking.CANCEL_REASON_USER
+            booking.save(update_fields=['status', 'cancellation_reason'])
         return Response({'message': 'Booking cancelled successfully'})
 
     @action(detail=True, methods=['post'])
@@ -323,6 +400,9 @@ class BookingViewSet(viewsets.ModelViewSet):
 
         if not new_departure_id:
             return Response({'error': 'new_departure_id is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if _expire_pending_booking_if_needed(booking):
+            return Response({'error': 'Booking payment window has expired and booking was cancelled.'}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
             new_departure = PackageDeparture.objects.get(id=new_departure_id)
@@ -386,6 +466,145 @@ class PaymentViewSet(viewsets.ModelViewSet):
     ordering_fields = ['created_at', 'amount_npr']
     ordering = ['-created_at']
 
+    def get_queryset(self):
+        user = self.request.user
+        if user.profile.role in ['agent', 'admin']:
+            return Payment.objects.all()
+        return Payment.objects.filter(booking__tourist=user)
+
+    def perform_create(self, serializer):
+        booking = serializer.validated_data.get('booking')
+        if booking is None:
+            raise ValidationError({'booking_id': 'Booking is required.'})
+
+        if request_user := getattr(self.request, 'user', None):
+            if request_user.profile.role not in ['agent', 'admin'] and booking.tourist_id != request_user.id:
+                raise ValidationError({'booking_id': 'You do not have permission for this booking.'})
+
+        if _expire_pending_booking_if_needed(booking):
+            raise ValidationError({'booking_id': 'Booking has expired and was automatically cancelled.'})
+
+        if booking.status != Booking.STATUS_PENDING:
+            raise ValidationError({'booking_id': 'Only pending bookings can be paid.'})
+
+        serializer.save()
+
+    @action(detail=False, methods=['post'])
+    def initiate_khalti(self, request):
+        """
+        Initiate Khalti hosted checkout.
+        Request: { booking_id, amount_npr, frontend_url? }
+        """
+        booking_id = request.data.get('booking_id')
+        amount_npr = request.data.get('amount_npr')
+        frontend_url = request.data.get('frontend_url')
+
+        if not booking_id or not amount_npr:
+            return Response({'error': 'Missing booking_id or amount_npr'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if not settings.KHALTI_SECRET_KEY:
+            return Response({'error': 'KHALTI_SECRET_KEY is not configured on server.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        try:
+            booking = Booking.objects.get(id=booking_id, tourist=request.user)
+        except Booking.DoesNotExist:
+            return Response({'error': 'Booking not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        if _expire_pending_booking_if_needed(booking):
+            return Response({'error': 'Booking expired after 5 minutes and was cancelled.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if booking.status != Booking.STATUS_PENDING:
+            return Response({'error': 'Only pending bookings can be paid.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if not frontend_url:
+            protocol = 'https' if request.is_secure() else 'http'
+            frontend_url = request.META.get('HTTP_ORIGIN') or f"{protocol}://{request.get_host()}"
+
+        use_khalti_mock = getattr(settings, 'KHALTI_USE_MOCK', False) and not getattr(settings, 'KHALTI_PRODUCTION_MODE', False)
+        if use_khalti_mock:
+            mock_pidx = f"MOCK_{booking.booking_code}_{uuid4().hex[:8]}"
+            result = {
+                'success': True,
+                'payment_url': f"{frontend_url}/payment/khalti-success/?pidx={mock_pidx}",
+                'pidx': mock_pidx,
+            }
+        else:
+            result = KhaltiPaymentGateway.initiate_payment(booking, amount_npr, frontend_url)
+
+        if not result.get('success'):
+            return Response({'error': result.get('error', 'Failed to initiate Khalti payment')}, status=status.HTTP_400_BAD_REQUEST)
+
+        Payment.objects.update_or_create(
+            booking=booking,
+            defaults={
+                'method': Payment.METHOD_KHALTI,
+                'amount_npr': amount_npr,
+                'status': Payment.STATUS_PENDING,
+                'transaction_id': result.get('pidx'),
+            },
+        )
+
+        return Response({
+            'success': True,
+            'payment_url': result.get('payment_url'),
+            'pidx': result.get('pidx'),
+            'booking_code': booking.booking_code,
+        })
+
+    @action(detail=False, methods=['post'])
+    def khalti_verify(self, request):
+        """Verify Khalti payment using pidx after redirect callback."""
+        pidx = request.data.get('pidx')
+        if not pidx:
+            return Response({'error': 'pidx is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        verify = KhaltiPaymentGateway.lookup_payment(pidx)
+        if not verify.get('success'):
+            return Response({'error': verify.get('error', 'Failed to verify Khalti payment')}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            payment = Payment.objects.select_related('booking').get(transaction_id=pidx)
+        except Payment.DoesNotExist:
+            booking_code = verify.get('purchase_order_id')
+            if not booking_code:
+                return Response({'error': 'Payment record not found'}, status=status.HTTP_404_NOT_FOUND)
+            try:
+                booking = Booking.objects.get(booking_code=booking_code)
+            except Booking.DoesNotExist:
+                return Response({'error': 'Booking not found'}, status=status.HTTP_404_NOT_FOUND)
+            payment = Payment.objects.filter(booking=booking).first()
+            if payment is None:
+                return Response({'error': 'Payment record not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        booking = payment.booking
+        if booking.tourist_id != request.user.id and request.user.profile.role not in ['admin', 'agent']:
+            return Response({'error': 'You do not have permission for this payment.'}, status=status.HTTP_403_FORBIDDEN)
+
+        if _expire_pending_booking_if_needed(booking):
+            return Response({'error': 'Payment arrived after expiry. Booking already cancelled.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if verify.get('status') != 'Completed':
+            return Response({
+                'success': False,
+                'status': verify.get('status'),
+                'message': 'Khalti payment not completed yet.'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        payment.status = Payment.STATUS_SUCCESS
+        payment.paid_at = timezone.now()
+        payment.transaction_id = verify.get('transaction_id') or pidx
+        payment.save(update_fields=['status', 'paid_at', 'transaction_id'])
+
+        booking.status = Booking.STATUS_CONFIRMED
+        booking.save(update_fields=['status'])
+
+        return Response({
+            'success': True,
+            'booking_code': booking.booking_code,
+            'booking_status': booking.status,
+            'payment_status': payment.status,
+        })
+
     @action(detail=True, methods=['post'])
     def confirm_payment(self, request, pk=None):
         """Confirm payment (for manual cash/bank transfers)"""
@@ -431,6 +650,11 @@ class PaymentViewSet(viewsets.ModelViewSet):
                 )
             
             booking = Booking.objects.get(id=booking_id, tourist=request.user)
+            if _expire_pending_booking_if_needed(booking):
+                return Response({'error': 'Booking expired after 5 minutes and was cancelled.'}, status=status.HTTP_400_BAD_REQUEST)
+
+            if booking.status != Booking.STATUS_PENDING:
+                return Response({'error': 'Only pending bookings can be paid.'}, status=status.HTTP_400_BAD_REQUEST)
             
             # Build callback URLs using frontend domain
             # Try to use provided frontend_url, fallback to referrer, then backend
@@ -457,7 +681,7 @@ class PaymentViewSet(viewsets.ModelViewSet):
                 amount_npr=amount_npr,
                 success_url=success_url,
                 failure_url=failure_url,
-                product_code='SMART_TOURISM',
+                product_code=settings.ESEWA_MERCHANT_CODE,
                 frontend_url=frontend_url
             )
             
@@ -524,6 +748,8 @@ class PaymentViewSet(viewsets.ModelViewSet):
             
             try:
                 booking = Booking.objects.get(booking_code=booking_code)
+                if _expire_pending_booking_if_needed(booking):
+                    return Response({'error': 'Payment arrived after expiry. Booking already cancelled.'}, status=status.HTTP_400_BAD_REQUEST)
                 payment = Payment.objects.get(booking=booking)
                 
                 # Update payment status

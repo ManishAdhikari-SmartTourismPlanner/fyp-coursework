@@ -1,13 +1,13 @@
-﻿import { useEffect, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useSearchParams, useNavigate } from 'react-router-dom'
-import { handleESewaCallback } from '../services/tourism'
+import { verifyKhaltiPayment } from '../services/tourism'
 import '../styles/payment-callback.css'
 
-export default function ESewaSuccessPage() {
+export default function KhaltiSuccessPage() {
   const [searchParams] = useSearchParams()
   const navigate = useNavigate()
-  const [status, setStatus] = useState('processing') // processing, success, error
-  const [message, setMessage] = useState('Verifying your eSewa payment...')
+  const [status, setStatus] = useState('processing')
+  const [message, setMessage] = useState('Verifying your Khalti payment...')
   const [bookingCode, setBookingCode] = useState('')
 
   useEffect(() => {
@@ -16,33 +16,26 @@ export default function ESewaSuccessPage() {
 
   async function processPayment() {
     try {
-      const params = Object.fromEntries(searchParams)
-
-      if (!params.refId && !params.data) {
+      const pidx = searchParams.get('pidx')
+      if (!pidx) {
         setStatus('error')
-        setMessage('Invalid payment response from eSewa')
+        setMessage('Missing Khalti payment reference (pidx).')
         return
       }
 
-      // Call backend to verify payment
-      const result = await handleESewaCallback(params)
-      
+      const result = await verifyKhaltiPayment(pidx)
       if (result.success) {
         setStatus('success')
-        setMessage('Payment Successful! Your booking is confirmed.')
+        setMessage('Khalti payment successful. Your booking is confirmed.')
         setBookingCode(result.booking_code)
-        
-        // Redirect to booking confirmation after 3 seconds
-        setTimeout(() => {
-          navigate(`/booking-confirmation?code=${result.booking_code}`)
-        }, 3000)
+        setTimeout(() => navigate('/tourist'), 2500)
       } else {
         setStatus('error')
-        setMessage(result.error || 'Payment verification failed. Please contact support.')
+        setMessage(result.message || result.error || 'Khalti payment verification failed.')
       }
     } catch (err) {
       setStatus('error')
-      setMessage(err.message || 'Error processing payment callback')
+      setMessage(err.message || 'Error verifying Khalti payment.')
     }
   }
 
@@ -53,11 +46,11 @@ export default function ESewaSuccessPage() {
           <div className="callback-icon">
             {status === 'processing' && <span className="spinner"></span>}
             {status === 'success' && <span className="success-icon"></span>}
-            {status === 'error' && <span className="error-icon">|</span>}
+            {status === 'error' && <span className="error-icon">x</span>}
           </div>
 
           <h1 className="callback-title">
-            {status === 'processing' && 'Processing Payment'}
+            {status === 'processing' && 'Processing Khalti Payment'}
             {status === 'success' && 'Payment Successful!'}
             {status === 'error' && 'Payment Failed'}
           </h1>
@@ -67,17 +60,17 @@ export default function ESewaSuccessPage() {
           {bookingCode && (
             <div className="booking-info">
               <p>Your booking code: <code>{bookingCode}</code></p>
-              <p className="info-text">You will be redirected to your booking confirmation shortly...</p>
+              <p className="info-text">Redirecting to your dashboard...</p>
             </div>
           )}
 
           {status === 'error' && (
             <div className="error-actions">
-              <button className="btn-primary" onClick={() => navigate(-1)}>
-                Go Back
+              <button className="btn-primary" onClick={() => navigate('/booking')}>
+                Try Again
               </button>
-              <button className="btn-secondary" onClick={() => navigate('/')}>
-                Home
+              <button className="btn-secondary" onClick={() => navigate('/tourist')}>
+                Dashboard
               </button>
             </div>
           )}
@@ -86,4 +79,3 @@ export default function ESewaSuccessPage() {
     </div>
   )
 }
-

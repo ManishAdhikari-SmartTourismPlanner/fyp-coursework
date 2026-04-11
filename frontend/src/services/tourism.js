@@ -225,6 +225,24 @@ export async function initiateESewaPayment(bookingId, amount) {
   });
 }
 
+export async function initiateKhaltiPayment(bookingId, amount) {
+  return authRequest('/api/tourism/payments/initiate_khalti/', {
+    method: 'POST',
+    body: JSON.stringify({
+      booking_id: bookingId,
+      amount_npr: amount,
+      frontend_url: window.location.origin,
+    }),
+  });
+}
+
+export async function verifyKhaltiPayment(pidx) {
+  return authRequest('/api/tourism/payments/khalti_verify/', {
+    method: 'POST',
+    body: JSON.stringify({ pidx }),
+  });
+}
+
 export async function handleESewaCallback(queryParams) {
   const query = new URLSearchParams(queryParams);
   return authRequest(`/api/tourism/payments/esewa_callback/?${query.toString()}`);

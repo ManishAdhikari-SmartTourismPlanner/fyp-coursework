@@ -78,6 +78,23 @@ export async function loginWithUsername(username, password) {
     body: JSON.stringify({ username, password }),
   });
 
+  if (data.access && data.refresh && data.user) {
+    tokenStore.setSession({
+      access: data.access,
+      refresh: data.refresh,
+      user: data.user,
+    });
+  }
+
+  return data;
+}
+
+export async function verifyTouristOtp(challengeId, code) {
+  const data = await request('/api/auth/verify-otp/', {
+    method: 'POST',
+    body: JSON.stringify({ challenge_id: challengeId, code }),
+  });
+
   tokenStore.setSession({
     access: data.access,
     refresh: data.refresh,

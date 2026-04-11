@@ -71,6 +71,16 @@ class LogoutSerializer(serializers.Serializer):
         return value
 
 
+class LoginSerializer(serializers.Serializer):
+    username = serializers.CharField()
+    password = serializers.CharField(write_only=True)
+
+
+class VerifyOTPSerializer(serializers.Serializer):
+    challenge_id = serializers.UUIDField()
+    code = serializers.CharField(min_length=4, max_length=10)
+
+
 class CreateAgentSerializer(serializers.ModelSerializer):
     password = serializers.CharField(write_only=True, min_length=8)
 

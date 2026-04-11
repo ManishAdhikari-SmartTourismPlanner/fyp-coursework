@@ -1,6 +1,8 @@
 from django.contrib.auth.models import User
 from django.db import models
 from django.utils import timezone
+from datetime import timedelta
+from uuid import uuid4
 
 
 class TimeStampedModel(models.Model):
@@ -176,6 +178,16 @@ class Booking(TimeStampedModel):
 		(STATUS_RESCHEDULED, 'Rescheduled'),
 	]
 
+	CANCEL_REASON_TIMEOUT = 'payment_timeout'
+	CANCEL_REASON_USER = 'cancelled_by_user'
+
+	CANCEL_REASON_CHOICES = [
+		(CANCEL_REASON_TIMEOUT, 'Payment Timeout'),
+		(CANCEL_REASON_USER, 'Cancelled By User'),
+	]
+
+	PAYMENT_WINDOW_MINUTES = 5
+
 	booking_code = models.CharField(max_length=20, unique=True, blank=True)
 	tourist = models.ForeignKey(User, on_delete=models.PROTECT, related_name='bookings')
 	package = models.ForeignKey(Package, on_delete=models.PROTECT, related_name='bookings')
@@ -188,9 +200,11 @@ class Booking(TimeStampedModel):
 	)
 	travelers_count = models.PositiveIntegerField(default=1)
 	status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_PENDING)
+	cancellation_reason = models.CharField(max_length=40, choices=CANCEL_REASON_CHOICES, blank=True)
 	special_request = models.TextField(blank=True)
 	total_amount_npr = models.DecimalField(max_digits=12, decimal_places=2)
 	booking_date = models.DateTimeField(default=timezone.now)
+	payment_due_at = models.DateTimeField(blank=True, null=True)
 
 	class Meta:
 		ordering = ['-booking_date']
@@ -201,8 +215,13 @@ class Booking(TimeStampedModel):
 
 	def save(self, *args, **kwargs):
 		if not self.booking_code:
-			timestamp = timezone.now().strftime('%Y%m%d%H%M%S')
-			self.booking_code = f'BK{timestamp}'
+			# Keep booking_code within max_length=20: BK + 12-digit timestamp + 6-char suffix.
+			timestamp = timezone.now().strftime('%y%m%d%H%M%S')
+			suffix = uuid4().hex[:6].upper()
+			self.booking_code = f'BK{timestamp}{suffix}'
+
+		if self.status == self.STATUS_PENDING and not self.payment_due_at:
+			self.payment_due_at = self.booking_date + timedelta(minutes=self.PAYMENT_WINDOW_MINUTES)
 		super().save(*args, **kwargs)
 
 	def __str__(self):

@@ -210,13 +210,16 @@ class BookingListSerializer(serializers.ModelSerializer):
     package_title = serializers.CharField(source='package.title', read_only=True)
     destination_name = serializers.CharField(source='package.destination.name', read_only=True)
     departure_date = serializers.SerializerMethodField()
+    payment_due_at = serializers.DateTimeField(read_only=True)
+    cancellation_reason = serializers.CharField(read_only=True)
 
     class Meta:
         model = Booking
         fields = [
             'id', 'booking_code', 'tourist_username', 'package_title',
             'destination_name', 'departure_date', 'travelers_count',
-            'status', 'total_amount_npr', 'booking_date'
+            'status', 'cancellation_reason', 'total_amount_npr', 'booking_date',
+            'payment_due_at'
         ]
         read_only_fields = ['id', 'booking_code', 'booking_date']
 
@@ -240,8 +243,8 @@ class BookingDetailSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'booking_code', 'tourist', 'tourist_username', 'package',
             'package_id', 'departure', 'departure_id', 'travelers_count',
-            'status', 'special_request', 'total_amount_npr', 'booking_date',
-            'created_at', 'updated_at', 'payment'
+            'status', 'cancellation_reason', 'special_request', 'total_amount_npr',
+            'booking_date', 'payment_due_at', 'created_at', 'updated_at', 'payment'
         ]
         read_only_fields = ['id', 'booking_code', 'tourist', 'booking_date', 'created_at', 'updated_at']
 
@@ -290,15 +293,37 @@ class BookingDetailSerializer(serializers.ModelSerializer):
 
 
 class PaymentSerializer(serializers.ModelSerializer):
+    booking_id = serializers.IntegerField(write_only=True, required=False)
+    booking_code_input = serializers.CharField(write_only=True, required=False)
     booking_code = serializers.CharField(source='booking.booking_code', read_only=True)
 
     class Meta:
         model = Payment
         fields = [
-            'id', 'booking_code', 'method', 'transaction_id', 'amount_npr',
+            'id', 'booking_id', 'booking_code_input', 'booking_code', 'method', 'transaction_id', 'amount_npr',
             'status', 'paid_at', 'created_at', 'updated_at'
         ]
         read_only_fields = ['id', 'created_at', 'updated_at', 'paid_at']
+
+    def validate(self, attrs):
+        booking_id = attrs.pop('booking_id', None)
+        booking_code = attrs.pop('booking_code_input', None)
+
+        if booking_id is None and booking_code is None and self.instance is None:
+            raise serializers.ValidationError({'booking_id': 'booking_id or booking_code_input is required.'})
+
+        if booking_id is not None:
+            try:
+                attrs['booking'] = Booking.objects.get(id=booking_id)
+            except Booking.DoesNotExist:
+                raise serializers.ValidationError({'booking_id': 'Booking not found.'})
+        elif booking_code is not None:
+            try:
+                attrs['booking'] = Booking.objects.get(booking_code=booking_code)
+            except Booking.DoesNotExist:
+                raise serializers.ValidationError({'booking_code_input': 'Booking not found.'})
+
+        return attrs
 
 
 class ReviewSerializer(serializers.ModelSerializer):
