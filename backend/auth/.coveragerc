@@ -1,0 +1,17 @@
+[run]
+source = .
+
+[report]
+omit =
+    activate_packages.py
+    add_missing_packages.py
+    check_mardi.py
+    check_packages.py
+    manage.py
+    populate_data.py
+    run_seed.py
+    auth/asgi.py
+    auth/wsgi.py
+    auth/email_backends.py
+    */migrations/*
+    */management/commands/*

@@ -25,6 +25,9 @@ export default function Navbar() {
       <div className="navbar-user">
         <span className={`role-badge role-${user?.role}`}>{user?.role}</span>
         <span className="navbar-username">{user?.username}</span>
+        <button className="btn-secondary" onClick={() => navigate('/profile')}>
+          Profile
+        </button>
         <button className="btn-logout" onClick={handleLogout} disabled={loading}>
           {loading ? 'Logging out...' : 'Logout'}
         </button>

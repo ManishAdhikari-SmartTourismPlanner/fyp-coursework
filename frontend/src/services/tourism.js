@@ -106,6 +106,12 @@ export async function deletePackage(id) {
   });
 }
 
+export async function cancelPackage(id) {
+  return authRequest(`/api/tourism/packages/${id}/cancel_package/`, {
+    method: 'POST',
+  });
+}
+
 export async function fetchPackageDepartures(packageId) {
   return authRequest(`/api/tourism/packages/${packageId}/departures/`);
 }
@@ -183,65 +189,32 @@ export async function fetchAllPayments(params = {}) {
   return authRequest(`/api/tourism/payments/?${query.toString()}`);
 }
 
-// ===== OFFLINE MAPS =====
-export async function fetchOfflineMaps(params = {}) {
-  const query = new URLSearchParams(params);
-  return authRequest(`/api/tourism/offline-maps/?${query.toString()}`);
+export async function fetchCancelledPackageRefunds() {
+  return authRequest('/api/tourism/payments/cancelled_package_refunds/');
 }
 
-export async function createOfflineMap(payload) {
-  return authRequest('/api/tourism/offline-maps/', {
+export async function refundCancelledPackagePayment(paymentId, reason) {
+  return authRequest(`/api/tourism/payments/${paymentId}/refund_cancelled_package/`, {
     method: 'POST',
-    body: JSON.stringify(payload),
+    body: JSON.stringify(reason ? { reason } : {}),
   });
 }
 
-export async function updateOfflineMap(id, payload) {
-  return authRequest(`/api/tourism/offline-maps/${id}/`, {
-    method: 'PUT',
-    body: JSON.stringify(payload),
-  });
-}
-
-export async function deleteOfflineMap(id) {
-  return authRequest(`/api/tourism/offline-maps/${id}/`, {
-    method: 'DELETE',
-  });
-}
-
-export async function fetchLatestOfflineMaps(destinationId) {
-  return authRequest(`/api/tourism/offline-maps/latest/?destination=${destinationId}`);
-}
-
-// ===== eSEWA PAYMENT GATEWAY =====
-export async function initiateESewaPayment(bookingId, amount) {
-  return authRequest('/api/tourism/payments/initiate_esewa/', {
+export async function initiateKhaltiPayment(bookingId, amount) {
+  return authRequest('/api/tourism/payments/initiate_khalti/', {
     method: 'POST',
     body: JSON.stringify({
       booking_id: bookingId,
       amount_npr: amount,
-      frontend_url: window.location.origin, // Send frontend domain
+      frontend_url: window.location.origin,
     }),
   });
 }
 
-export async function handleESewaCallback(queryParams) {
-  const query = new URLSearchParams(queryParams);
-  return authRequest(`/api/tourism/payments/esewa_callback/?${query.toString()}`);
-}
-
-// ===== REVIEWS =====
-export async function createReview(payload) {
-  return authRequest('/api/tourism/reviews/', {
+export async function verifyKhaltiPayment(pidx) {
+  return authRequest('/api/tourism/payments/khalti_verify/', {
     method: 'POST',
-    body: JSON.stringify(payload),
+    body: JSON.stringify({ pidx }),
   });
 }
 
-export async function fetchDestinationReviews(destinationId) {
-  return authRequest(`/api/tourism/destinations/${destinationId}/reviews/`);
-}
-
-export async function fetchAllReviews() {
-  return authRequest('/api/tourism/reviews/');
-}

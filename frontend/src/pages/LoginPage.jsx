@@ -1,5 +1,5 @@
 ﻿import { useState } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { loginWithUsername } from '../services/auth'
 import { useAuth } from '../context/AuthContext'
 
@@ -8,7 +8,10 @@ export default function LoginPage() {
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
   const { setUser } = useAuth()
+  const location = useLocation()
   const navigate = useNavigate()
+
+  const notice = location.state?.message
 
   function updateField(e) {
     setForm(prev => ({ ...prev, [e.target.name]: e.target.value }))
@@ -37,6 +40,7 @@ export default function LoginPage() {
         <p className="auth-subtitle">Sign in to your account</p>
 
         {error && <p className="alert alert-error">{error}</p>}
+        {notice && <p className="alert alert-success">{notice}</p>}
 
         <form className="auth-form" onSubmit={handleLogin}>
           <div className="form-group">
@@ -67,6 +71,10 @@ export default function LoginPage() {
             {loading ? 'Signing in...' : 'Login'}
           </button>
         </form>
+
+        <p className="auth-note">
+          Forgot password? <Link to="/forgot-password">Reset it here</Link>
+        </p>
 
         <p className="auth-footer">
           New tourist? <Link to="/register">Create account</Link>

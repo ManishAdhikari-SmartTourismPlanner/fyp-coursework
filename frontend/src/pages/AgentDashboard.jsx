@@ -1,4 +1,4 @@
-﻿import { useEffect, useMemo, useState } from 'react'
+﻿import { Suspense, lazy, useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import Navbar from '../components/Navbar'
 import { useAuth } from '../context/AuthContext'
@@ -12,16 +12,14 @@ import {
   fetchPackageDetail,
   updatePackage,
   deletePackage,
+  cancelPackage,
   createPackageDeparture,
   fetchAllBookings,
   fetchAllPayments,
-  fetchOfflineMaps,
-  createOfflineMap,
-  updateOfflineMap,
-  deleteOfflineMap,
-  confirmBooking,
-  cancelBooking,
 } from '../services/tourism'
+import { buildCountSeries, buildMonthlySeries } from '../utils/analytics'
+
+const AnalyticsCharts = lazy(() => import('../components/AnalyticsCharts'))
 
 export default function AgentDashboard() {
   const { user } = useAuth()
@@ -30,12 +28,14 @@ export default function AgentDashboard() {
   const [packages, setPackages] = useState([])
   const [bookings, setBookings] = useState([])
   const [payments, setPayments] = useState([])
-  const [offlineMaps, setOfflineMaps] = useState([])
   const [loadingPage, setLoadingPage] = useState(true)
   const [error, setError] = useState('')
-  const [processingBookingId, setProcessingBookingId] = useState(null)
   const [processingPackageId, setProcessingPackageId] = useState(null)
   const [activeTab, setActiveTab] = useState('overview')
+  const [destinationSearch, setDestinationSearch] = useState('')
+  const [packageSearch, setPackageSearch] = useState('')
+  const [bookingSearch, setBookingSearch] = useState('')
+  const [bookingFilter, setBookingFilter] = useState('all')
   const [destinationMessage, setDestinationMessage] = useState('')
   const [savingDestination, setSavingDestination] = useState(false)
   const [editingDestinationId, setEditingDestinationId] = useState(null)
@@ -44,9 +44,6 @@ export default function AgentDashboard() {
   const [editingPackageId, setEditingPackageId] = useState(null)
   const [departureMessage, setDepartureMessage] = useState('')
   const [savingDeparture, setSavingDeparture] = useState(false)
-  const [mapMessage, setMapMessage] = useState('')
-  const [savingMap, setSavingMap] = useState(false)
-  const [editingMapId, setEditingMapId] = useState(null)
   const [destinationForm, setDestinationForm] = useState({
     name: '',
     slug: '',
@@ -83,18 +80,12 @@ export default function AgentDashboard() {
     total_seats: 10,
     status: 'open',
   })
-  const [mapForm, setMapForm] = useState({
-    destination_id: '',
-    title: '',
-    file_url: '',
-    version: 'v1',
-    file_size_mb: 0,
-    is_active: true,
-  })
 
   useEffect(() => {
-    loadAgentData()
-  }, [])
+    if (user?.id) {
+      loadAgentData()
+    }
+  }, [user?.id])
 
   async function loadAllPages(fetchFunc, initialData = {}) {
     let allResults = [...(initialData.results || [initialData])]
@@ -120,25 +111,41 @@ export default function AgentDashboard() {
     setLoadingPage(true)
     setError('')
     try {
-      const [destsData, pkgsData, bksData, pmsData, mapsData] = await Promise.all([
+      const [destsData, pkgsData, bksData, pmsData] = await Promise.allSettled([
         fetchDestinations(),
-        fetchPackages(),
+        fetchPackages({ created_by: user?.id }),
         fetchAllBookings(),
         fetchAllPayments(),
-        fetchOfflineMaps(),
       ])
 
-      const dests = await loadAllPages(fetchDestinations, destsData)
-      const pkgs = await loadAllPages(fetchPackages, pkgsData)
-      const maps = await loadAllPages(fetchOfflineMaps, mapsData)
-      const bks = Array.isArray(bksData) ? bksData : bksData.results || bksData
-      const pms = Array.isArray(pmsData) ? pmsData : pmsData.results || pmsData
+      const errors = []
+
+      const dests = destsData.status === 'fulfilled'
+        ? await loadAllPages(fetchDestinations, destsData.value)
+        : []
+      const pkgs = pkgsData.status === 'fulfilled'
+        ? await loadAllPages(fetchPackages, pkgsData.value)
+        : []
+      const bks = bksData.status === 'fulfilled'
+        ? await loadAllPages(fetchAllBookings, bksData.value)
+        : []
+      const pms = pmsData.status === 'fulfilled'
+        ? await loadAllPages(fetchAllPayments, pmsData.value)
+        : []
+
+      if (destsData.status === 'rejected') errors.push(destsData.reason?.message || 'Failed to load destinations.')
+      if (pkgsData.status === 'rejected') errors.push(pkgsData.reason?.message || 'Failed to load packages.')
+      if (bksData.status === 'rejected') errors.push(bksData.reason?.message || 'Failed to load bookings.')
+      if (pmsData.status === 'rejected') errors.push(pmsData.reason?.message || 'Failed to load payments.')
 
       setDestinations(dests)
       setPackages(pkgs)
-      setOfflineMaps(maps)
       setBookings(bks)
       setPayments(pms)
+
+      if (errors.length > 0) {
+        setError(errors.join(' | '))
+      }
     } catch (err) {
       setError(err.message || 'Failed to load agent data.')
     } finally {
@@ -221,26 +228,6 @@ export default function AgentDashboard() {
       total_seats: 10,
       status: 'open',
     })
-  }
-
-  function resetMapForm() {
-    setEditingMapId(null)
-    setMapForm({
-      destination_id: '',
-      title: '',
-      file_url: '',
-      version: 'v1',
-      file_size_mb: 0,
-      is_active: true,
-    })
-  }
-
-  function updateMapField(e) {
-    const { name, value, type, checked } = e.target
-    setMapForm((prev) => ({
-      ...prev,
-      [name]: type === 'checkbox' ? checked : value,
-    }))
   }
 
   function handleEditDestination(dest) {
@@ -376,8 +363,31 @@ export default function AgentDashboard() {
     }
   }
 
+  async function handleCancelPackage(packageId) {
+    const ok = window.confirm('Cancel this package? All active related bookings will be cancelled and paid users will be queued for refund.')
+    if (!ok) {
+      return
+    }
+
+    setProcessingPackageId(packageId)
+    setError('')
+    setPackageMessage('')
+    try {
+      await cancelPackage(packageId)
+      if (editingPackageId === packageId) {
+        resetPackageForm()
+      }
+      setPackageMessage('Package cancelled successfully. Admin can now process refunds for paid Khalti bookings.')
+      await loadAgentData()
+    } catch (err) {
+      setError(err.message || 'Failed to cancel package.')
+    } finally {
+      setProcessingPackageId(null)
+    }
+  }
+
   async function handleDeletePackage(packageId) {
-    const ok = window.confirm('Are you sure you want to delete this package? This cannot be undone.')
+    const ok = window.confirm('Delete this package? This cannot be undone.')
     if (!ok) {
       return
     }
@@ -424,72 +434,6 @@ export default function AgentDashboard() {
     }
   }
 
-  function handleEditMap(mapRow) {
-    setMapMessage('')
-    setError('')
-    setEditingMapId(mapRow.id)
-    setMapForm({
-      destination_id: mapRow.destination || '',
-      title: mapRow.title || '',
-      file_url: mapRow.file_url || '',
-      version: mapRow.version || 'v1',
-      file_size_mb: mapRow.file_size_mb || 0,
-      is_active: mapRow.is_active !== false,
-    })
-  }
-
-  async function handleSubmitMap(e) {
-    e.preventDefault()
-    setSavingMap(true)
-    setError('')
-    setMapMessage('')
-
-    const payload = {
-      destination_id: Number(mapForm.destination_id),
-      title: mapForm.title,
-      file_url: mapForm.file_url,
-      version: mapForm.version,
-      file_size_mb: Number(mapForm.file_size_mb || 0),
-      is_active: mapForm.is_active,
-    }
-
-    try {
-      if (editingMapId) {
-        await updateOfflineMap(editingMapId, payload)
-        setMapMessage('Offline map updated successfully.')
-      } else {
-        await createOfflineMap(payload)
-        setMapMessage('Offline map created successfully.')
-      }
-      resetMapForm()
-      await loadAgentData()
-    } catch (err) {
-      setError(err.message || 'Failed to save offline map.')
-    } finally {
-      setSavingMap(false)
-    }
-  }
-
-  async function handleDeleteMap(mapId) {
-    const ok = window.confirm('Are you sure you want to delete this offline map version?')
-    if (!ok) {
-      return
-    }
-
-    setError('')
-    setMapMessage('')
-    try {
-      await deleteOfflineMap(mapId)
-      if (editingMapId === mapId) {
-        resetMapForm()
-      }
-      setMapMessage('Offline map deleted successfully.')
-      await loadAgentData()
-    } catch (err) {
-      setError(err.message || 'Failed to delete offline map.')
-    }
-  }
-
   async function handleDeleteDestination(destinationId) {
     const ok = window.confirm('Are you sure you want to delete this destination? Related packages may also be removed.')
     if (!ok) {
@@ -510,40 +454,15 @@ export default function AgentDashboard() {
     }
   }
 
-  async function handleConfirmBooking(bookingId) {
-    setProcessingBookingId(bookingId)
-    try {
-      await confirmBooking(bookingId)
-      await loadAgentData()
-    } catch (err) {
-      setError(err.message || 'Failed to confirm booking.')
-    } finally {
-      setProcessingBookingId(null)
-    }
-  }
-
-  async function handleCancelBooking(bookingId) {
-    setProcessingBookingId(bookingId)
-    try {
-      await cancelBooking(bookingId)
-      await loadAgentData()
-    } catch (err) {
-      setError(err.message || 'Failed to cancel booking.')
-    } finally {
-      setProcessingBookingId(null)
-    }
-  }
-
   const bookingStats = useMemo(() => ({
-    total: bookings.length,
-    pending: bookings.filter(b => b.status === 'pending').length,
+    total: bookings.filter((b) => b.status !== 'pending').length,
     confirmed: bookings.filter(b => b.status === 'confirmed').length,
     cancelled: bookings.filter(b => b.status === 'cancelled').length,
   }), [bookings])
 
   const analytics = useMemo(() => {
     const totalRevenue = bookings
-      .filter(b => b.status !== 'cancelled')
+      .filter(b => ['confirmed', 'completed', 'rescheduled'].includes(b.status))
       .reduce((sum, b) => sum + Number(b.total_amount_npr || 0), 0)
 
     const paidRevenue = payments
@@ -594,6 +513,67 @@ export default function AgentDashboard() {
     return destinationPackageCounts.get(key) || 0
   }, [destinationPackageCounts, packageForm.destination_id])
 
+  const filteredDestinations = useMemo(() => {
+    const q = destinationSearch.trim().toLowerCase()
+    if (!q) {
+      return destinations
+    }
+    return destinations.filter((d) => {
+      const haystack = [d.name, d.province, d.district, d.tour_type, d.difficulty].join(' ').toLowerCase()
+      return haystack.includes(q)
+    })
+  }, [destinations, destinationSearch])
+
+  const filteredPackages = useMemo(() => {
+    const q = packageSearch.trim().toLowerCase()
+    if (!q) {
+      return packages
+    }
+    return packages.filter((p) => {
+      const haystack = [p.title, p.destination_name, p.package_type, p.tour_type].join(' ').toLowerCase()
+      return haystack.includes(q)
+    })
+  }, [packages, packageSearch])
+
+  const filteredBookings = useMemo(() => {
+    const q = bookingSearch.trim().toLowerCase()
+    return bookings.filter((b) => {
+      if (b.status === 'pending') {
+        return false
+      }
+      const statusMatches = bookingFilter === 'all' || b.status === bookingFilter
+      if (!statusMatches) {
+        return false
+      }
+      if (!q) {
+        return true
+      }
+      const haystack = [b.booking_code, b.tourist_username, b.package_title, b.status].join(' ').toLowerCase()
+      return haystack.includes(q)
+    })
+  }, [bookings, bookingFilter, bookingSearch])
+
+  const packageTypePieData = useMemo(() => ([
+    { name: 'Normal', value: packages.filter((pkg) => pkg.package_type === 'normal').length, color: '#2563eb' },
+    { name: 'Standard', value: packages.filter((pkg) => pkg.package_type === 'standard').length, color: '#0f766e' },
+    { name: 'Deluxe', value: packages.filter((pkg) => pkg.package_type === 'deluxe').length, color: '#7c3aed' },
+  ]), [packages])
+
+  const revenueTrendData = useMemo(() => buildMonthlySeries(
+    payments.filter((payment) => payment.status === 'success'),
+    'created_at',
+    (payment) => Number(payment.amount_npr || 0)
+  ), [payments])
+
+  const destinationDemandData = useMemo(() => buildCountSeries(
+    bookings,
+    (booking) => booking.destination_name || 'Unknown destination',
+    () => 1,
+    6
+  ), [bookings])
+
+  const destinationDemandTotal = destinationDemandData.reduce((sum, item) => sum + Number(item.value || 0), 0)
+
   if (loadingPage) {
     return (
       <div className="dashboard">
@@ -621,14 +601,14 @@ export default function AgentDashboard() {
               className={`nav-item ${activeTab === 'overview' ? 'active' : ''}`}
               onClick={() => setActiveTab('overview')}
             >
-              <span className="nav-icon"></span>
+              <span className="nav-icon">OV</span>
               <span className="nav-label">Overview</span>
             </button>
             <button
               className={`nav-item ${activeTab === 'destinations' ? 'active' : ''}`}
               onClick={() => setActiveTab('destinations')}
             >
-              <span className="nav-icon"></span>
+              <span className="nav-icon">DS</span>
               <span className="nav-label">Destinations</span>
               <span className="nav-badge">{destinations.length}</span>
             </button>
@@ -636,7 +616,7 @@ export default function AgentDashboard() {
               className={`nav-item ${activeTab === 'packages' ? 'active' : ''}`}
               onClick={() => setActiveTab('packages')}
             >
-              <span className="nav-icon"></span>
+              <span className="nav-icon">PK</span>
               <span className="nav-label">Packages</span>
               <span className="nav-badge">{packages.length}</span>
             </button>
@@ -644,23 +624,15 @@ export default function AgentDashboard() {
               className={`nav-item ${activeTab === 'bookings' ? 'active' : ''}`}
               onClick={() => setActiveTab('bookings')}
             >
-              <span className="nav-icon"></span>
+              <span className="nav-icon">BK</span>
               <span className="nav-label">Bookings</span>
               <span className="nav-badge">{bookingStats.total}</span>
-            </button>
-            <button
-              className={`nav-item ${activeTab === 'maps' ? 'active' : ''}`}
-              onClick={() => setActiveTab('maps')}
-            >
-              <span className="nav-icon"></span>
-              <span className="nav-label">Offline Maps</span>
-              <span className="nav-badge">{offlineMaps.length}</span>
             </button>
             <button
               className={`nav-item ${activeTab === 'analytics' ? 'active' : ''}`}
               onClick={() => setActiveTab('analytics')}
             >
-              <span className="nav-icon"></span>
+              <span className="nav-icon">AN</span>
               <span className="nav-label">Analytics</span>
             </button>
           </nav>
@@ -689,28 +661,28 @@ export default function AgentDashboard() {
 
               <div className="metrics-grid">
                 <div className="metric-card primary">
-                  <div className="metric-icon"></div>
+                  <div className="metric-icon">DS</div>
                   <div className="metric-info">
                     <p className="metric-value">{destinations.length}</p>
                     <p className="metric-label">Destinations</p>
                   </div>
                 </div>
                 <div className="metric-card accent">
-                  <div className="metric-icon"></div>
+                  <div className="metric-icon">PK</div>
                   <div className="metric-info">
                     <p className="metric-value">{packages.length}</p>
                     <p className="metric-label">Packages</p>
                   </div>
                 </div>
                 <div className="metric-card success">
-                  <div className="metric-icon"></div>
+                  <div className="metric-icon">BK</div>
                   <div className="metric-info">
                     <p className="metric-value">{bookingStats.total}</p>
                     <p className="metric-label">Total Bookings</p>
                   </div>
                 </div>
                 <div className="metric-card special">
-                  <div className="metric-icon"></div>
+                  <div className="metric-icon">NR</div>
                   <div className="metric-info">
                     <p className="metric-value"> {Math.round(analytics.totalRevenue / 100000).toFixed(1)}L</p>
                     <p className="metric-label">Total Revenue</p>
@@ -720,12 +692,8 @@ export default function AgentDashboard() {
 
               <div className="overview-grid">
                 <div className="card overview-card">
-                  <h3> Booking Status</h3>
+                  <h3>Booking Status</h3>
                   <div className="status-list">
-                    <div className="status-item">
-                      <span className="status-label">Pending</span>
-                      <span className="status-count pending">{bookingStats.pending}</span>
-                    </div>
                     <div className="status-item">
                       <span className="status-label">Confirmed</span>
                       <span className="status-count confirmed">{bookingStats.confirmed}</span>
@@ -738,7 +706,7 @@ export default function AgentDashboard() {
                 </div>
 
                 <div className="card overview-card">
-                  <h3> Payment Status</h3>
+                  <h3>Payment Status</h3>
                   <div className="status-list">
                     <p className="status-value">Paid: <strong> {Math.round(analytics.paidRevenue).toLocaleString()}</strong></p>
                     <p className="status-value">Pending: <strong>{analytics.pendingPayments}</strong> payments</p>
@@ -747,7 +715,7 @@ export default function AgentDashboard() {
                 </div>
 
                 <div className="card overview-card">
-                  <h3> Quick Actions</h3>
+                  <h3>Quick Actions</h3>
                   <div className="action-buttons">
                     <button className="btn-outline" onClick={() => setActiveTab('destinations')}>
                       + Add Destination
@@ -757,9 +725,6 @@ export default function AgentDashboard() {
                     </button>
                     <button className="btn-outline" onClick={() => setActiveTab('bookings')}>
                       View Bookings
-                    </button>
-                    <button className="btn-outline" onClick={() => setActiveTab('maps')}>
-                      Manage Offline Maps
                     </button>
                   </div>
                 </div>
@@ -777,7 +742,7 @@ export default function AgentDashboard() {
 
               <div className="content-grid">
                 <div className="card form-card">
-                  <h3>| {editingDestinationId ? 'Edit Destination' : 'New Destination'}</h3>
+                  <h3>{editingDestinationId ? 'Edit Destination' : 'New Destination'}</h3>
                   {destinationMessage && <div className="alert alert-success">{destinationMessage}</div>}
                   <form className="modern-form" onSubmit={handleSubmitDestination}>
                     <div className="form-row">
@@ -867,8 +832,16 @@ export default function AgentDashboard() {
                 </div>
 
                 <div className="card list-card">
-                  <h3>- Your Destinations ({destinations.length})</h3>
-                  {destinations.length === 0 ? (
+                  <div className="list-headline">
+                    <h3>Destinations ({filteredDestinations.length})</h3>
+                    <input
+                      className="list-search"
+                      placeholder="Search by name, province, district, type..."
+                      value={destinationSearch}
+                      onChange={(e) => setDestinationSearch(e.target.value)}
+                    />
+                  </div>
+                  {filteredDestinations.length === 0 ? (
                     <p className="empty-state">No destinations yet. Create one to get started!</p>
                   ) : (
                     <div className="modern-table-wrapper">
@@ -884,21 +857,41 @@ export default function AgentDashboard() {
                           </tr>
                         </thead>
                         <tbody>
-                          {destinations.map((d) => (
-                            <tr key={d.id}>
-                              <td><strong>{d.name}</strong></td>
-                              <td>{d.province}, {d.district}</td>
-                              <td><span className="badge badge-info">{destinationPackageCounts.get(Number(d.id)) || 0}/3</span></td>
-                              <td>{d.difficulty}</td>
-                              <td><span className={`badge badge-${d.is_active ? 'success' : 'muted'}`}>{d.is_active ? 'Active' : 'Inactive'}</span></td>
-                              <td>
-                                <div className="action-buttons-compact">
-                                  <button className="btn-icon btn-edit" onClick={() => handleEditDestination(d)} title="Edit Destination">Edit</button>
-                                  <button className="btn-icon btn-delete" onClick={() => handleDeleteDestination(d.id)} title="Delete Destination">Delete</button>
-                                </div>
-                              </td>
-                            </tr>
-                          ))}
+                          {filteredDestinations.map((d) => {
+                            const isUpperMustang = String(d.name || '').trim().toLowerCase() === 'upper mustang'
+                            const canManageDestination = isUpperMustang
+                              ? d.created_by_username === user?.username
+                              : true
+                            return (
+                              <tr key={d.id}>
+                                <td><strong>{d.name}</strong></td>
+                                <td>{d.province}, {d.district}</td>
+                                <td><span className="badge badge-info">{destinationPackageCounts.get(Number(d.id)) || 0}/3</span></td>
+                                <td>{d.difficulty}</td>
+                                <td><span className={`badge badge-${d.is_active ? 'success' : 'muted'}`}>{d.is_active ? 'Active' : 'Inactive'}</span></td>
+                                <td>
+                                  <div className="action-buttons-compact">
+                                    <button
+                                      className="btn-icon btn-edit"
+                                      onClick={() => handleEditDestination(d)}
+                                      title={canManageDestination ? 'Edit Destination' : 'Only the creator can edit Upper Mustang'}
+                                      disabled={!canManageDestination}
+                                    >
+                                      Edit
+                                    </button>
+                                    <button
+                                      className="btn-icon btn-delete"
+                                      onClick={() => handleDeleteDestination(d.id)}
+                                      title={canManageDestination ? 'Delete Destination' : 'Only the creator can delete Upper Mustang'}
+                                      disabled={!canManageDestination}
+                                    >
+                                      Delete
+                                    </button>
+                                  </div>
+                                </td>
+                              </tr>
+                            )
+                          })}
                         </tbody>
                       </table>
                     </div>
@@ -918,7 +911,7 @@ export default function AgentDashboard() {
 
               <div className="content-grid">
                 <div className="card form-card">
-                  <h3> {editingPackageId ? 'Edit Package' : 'New Package'}</h3>
+                  <h3>{editingPackageId ? 'Edit Package' : 'New Package'}</h3>
                   {packageMessage && <div className="alert alert-success">{packageMessage}</div>}
                   <form className="modern-form" onSubmit={handleSubmitPackage}>
                     <div className="form-group">
@@ -1021,6 +1014,7 @@ export default function AgentDashboard() {
 
                   <hr style={{ margin: '20px 0', opacity: 0.2 }} />
                   <h3>New Departure</h3>
+                  <p className="auth-note">Past departure dates are automatically closed and cannot be booked.</p>
                   {departureMessage && <div className="alert alert-success">{departureMessage}</div>}
                   <form className="modern-form" onSubmit={handleSubmitDeparture}>
                     <div className="form-group">
@@ -1064,8 +1058,16 @@ export default function AgentDashboard() {
                 </div>
 
                 <div className="card list-card">
-                  <h3> All Packages ({packages.length})</h3>
-                  {packages.length === 0 ? (
+                  <div className="list-headline">
+                    <h3>All Packages ({filteredPackages.length})</h3>
+                    <input
+                      className="list-search"
+                      placeholder="Search by title, destination, type..."
+                      value={packageSearch}
+                      onChange={(e) => setPackageSearch(e.target.value)}
+                    />
+                  </div>
+                  {filteredPackages.length === 0 ? (
                     <p className="empty-state">No packages yet. Create one to start offering tours!</p>
                   ) : (
                     <div className="modern-table-wrapper">
@@ -1082,7 +1084,7 @@ export default function AgentDashboard() {
                           </tr>
                         </thead>
                         <tbody>
-                          {packages.map((p) => (
+                          {filteredPackages.map((p) => (
                             <tr key={p.id}>
                               <td><strong>{p.title}</strong></td>
                               <td>{p.destination_name}</td>
@@ -1094,6 +1096,7 @@ export default function AgentDashboard() {
                                 <div className="action-buttons-compact">
                                   <button className="btn-icon btn-edit" onClick={() => handleEditPackage(p.id)} disabled={processingPackageId === p.id} title="Edit Package">Edit</button>
                                   <button className="btn-icon btn-delete" onClick={() => handleDeletePackage(p.id)} disabled={processingPackageId === p.id} title="Delete Package">Delete</button>
+                                  <button className="btn-icon btn-secondary" onClick={() => handleCancelPackage(p.id)} disabled={processingPackageId === p.id || !p.is_active} title="Cancel Package">Cancel</button>
                                 </div>
                               </td>
                             </tr>
@@ -1116,7 +1119,28 @@ export default function AgentDashboard() {
               </div>
 
               <div className="card">
-                {bookings.length === 0 ? (
+                <div className="list-headline booking-headline">
+                  <h3>Booking Queue ({filteredBookings.length})</h3>
+                  <div className="booking-controls">
+                    <input
+                      className="list-search"
+                      placeholder="Search by code, customer, package..."
+                      value={bookingSearch}
+                      onChange={(e) => setBookingSearch(e.target.value)}
+                    />
+                    <select
+                      className="list-filter"
+                      value={bookingFilter}
+                      onChange={(e) => setBookingFilter(e.target.value)}
+                    >
+                      <option value="all">All</option>
+                      <option value="confirmed">Confirmed</option>
+                      <option value="cancelled">Cancelled</option>
+                    </select>
+                  </div>
+                </div>
+
+                {filteredBookings.length === 0 ? (
                   <p className="empty-state">No bookings yet. Once customers book your packages, they'll appear here.</p>
                 ) : (
                   <div className="modern-table-wrapper">
@@ -1125,6 +1149,7 @@ export default function AgentDashboard() {
                         <tr>
                           <th>Code</th>
                           <th>Customer</th>
+                          <th>Agency</th>
                           <th>Package</th>
                           <th>Status</th>
                           <th>Total</th>
@@ -1132,13 +1157,14 @@ export default function AgentDashboard() {
                         </tr>
                       </thead>
                       <tbody>
-                        {bookings.map((b) => (
+                        {filteredBookings.map((b) => (
                           <tr key={b.id}>
                             <td><code>{b.booking_code}</code></td>
                             <td>{b.tourist_username}</td>
+                            <td>{user?.username}</td>
                             <td>{b.package_title}</td>
                             <td>
-                              <span className={`badge badge-${b.status === 'confirmed' ? 'success' : b.status === 'cancelled' ? 'danger' : 'warning'}`}>
+                              <span className={`badge badge-${b.status === 'confirmed' ? 'success' : 'danger'}`}>
                                 {b.status}
                               </span>
                             </td>
@@ -1147,19 +1173,10 @@ export default function AgentDashboard() {
                               <div className="action-buttons-compact">
                                 <button
                                   className="btn-icon"
-                                  disabled={processingBookingId === b.id || b.status === 'confirmed' || b.status === 'cancelled'}
-                                  onClick={() => handleConfirmBooking(b.id)}
-                                  title="Confirm"
+                                  disabled={true}
+                                  title="Bookings are managed by the payment flow or package cancellation"
                                 >
-                                  
-                                </button>
-                                <button
-                                  className="btn-icon btn-warning"
-                                  disabled={processingBookingId === b.id || b.status === 'cancelled'}
-                                  onClick={() => handleCancelBooking(b.id)}
-                                  title="Cancel"
-                                >
-                                  
+                                  Managed
                                 </button>
                               </div>
                             </td>
@@ -1173,110 +1190,6 @@ export default function AgentDashboard() {
             </div>
           )}
 
-          {/* OFFLINE MAPS TAB */}
-          {activeTab === 'maps' && (
-            <div className="agent-content">
-              <div className="content-header">
-                <h1>Manage Offline Maps</h1>
-                <p>Create versioned offline map packs for destinations. Tourists can only view and download active versions.</p>
-              </div>
-
-              <div className="content-grid">
-                <div className="card form-card">
-                  <h3>{editingMapId ? 'Edit Offline Map' : 'New Offline Map'}</h3>
-                  {mapMessage && <div className="alert alert-success">{mapMessage}</div>}
-                  <form className="modern-form" onSubmit={handleSubmitMap}>
-                    <div className="form-group">
-                      <label>Destination</label>
-                      <select name="destination_id" value={mapForm.destination_id} onChange={updateMapField} required>
-                        <option value="">Select a destination</option>
-                        {destinations.map((d) => (
-                          <option key={d.id} value={d.id}>{d.name}</option>
-                        ))}
-                      </select>
-                    </div>
-
-                    <div className="form-group">
-                      <label>Map Title</label>
-                      <input name="title" value={mapForm.title} onChange={updateMapField} placeholder="Trail map or city guide" required />
-                    </div>
-
-                    <div className="form-group">
-                      <label>File URL</label>
-                      <input name="file_url" value={mapForm.file_url} onChange={updateMapField} placeholder="https://..." required />
-                    </div>
-
-                    <div className="form-row">
-                      <div className="form-group">
-                        <label>Version</label>
-                        <input name="version" value={mapForm.version} onChange={updateMapField} placeholder="v1" required />
-                      </div>
-                      <div className="form-group">
-                        <label>File Size (MB)</label>
-                        <input name="file_size_mb" type="number" min="0" step="0.01" value={mapForm.file_size_mb} onChange={updateMapField} required />
-                      </div>
-                    </div>
-
-                    <div className="form-checkbox">
-                      <input id="map-active" name="is_active" type="checkbox" checked={mapForm.is_active} onChange={updateMapField} />
-                      <label htmlFor="map-active">Active Version</label>
-                    </div>
-
-                    <div className="form-actions">
-                      <button className="btn-primary" type="submit" disabled={savingMap}>
-                        {savingMap ? 'Saving...' : (editingMapId ? 'Update Offline Map' : 'Create Offline Map')}
-                      </button>
-                      {editingMapId && (
-                        <button className="btn-secondary" type="button" onClick={resetMapForm}>
-                          Cancel
-                        </button>
-                      )}
-                    </div>
-                  </form>
-                </div>
-
-                <div className="card list-card">
-                  <h3>All Offline Maps ({offlineMaps.length})</h3>
-                  {offlineMaps.length === 0 ? (
-                    <p className="empty-state">No offline maps yet. Add your first map pack.</p>
-                  ) : (
-                    <div className="modern-table-wrapper">
-                      <table className="modern-table">
-                        <thead>
-                          <tr>
-                            <th>Destination</th>
-                            <th>Title</th>
-                            <th>Version</th>
-                            <th>Size</th>
-                            <th>Status</th>
-                            <th>Actions</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {offlineMaps.map((m) => (
-                            <tr key={m.id}>
-                              <td>{m.destination_name}</td>
-                              <td>{m.title}</td>
-                              <td>{m.version}</td>
-                              <td>{m.file_size_mb} MB</td>
-                              <td><span className={`badge badge-${m.is_active ? 'success' : 'muted'}`}>{m.is_active ? 'Active' : 'Inactive'}</span></td>
-                              <td>
-                                <div className="action-buttons-compact">
-                                  <button className="btn-icon btn-edit" onClick={() => handleEditMap(m)} title="Edit Offline Map">Edit</button>
-                                  <button className="btn-icon btn-delete" onClick={() => handleDeleteMap(m.id)} title="Delete Offline Map">Delete</button>
-                                </div>
-                              </td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  )}
-                </div>
-              </div>
-            </div>
-          )}
-
           {/* ANALYTICS TAB */}
           {activeTab === 'analytics' && (
             <div className="agent-content">
@@ -1285,9 +1198,36 @@ export default function AgentDashboard() {
                 <p>Performance metrics and customer data</p>
               </div>
 
+              <Suspense fallback={<div className="dashboard-chart-loading">Loading analytics charts...</div>}>
+                <AnalyticsCharts
+                  pieTitle="Package Mix"
+                  pieDescription="Your package inventory split by tier."
+                  pieData={packageTypePieData}
+                  pieTotalLabel="Total packages"
+                  pieTotalValue={packages.length}
+                  pieLegendItems={packageTypePieData}
+                  lineTitle="Revenue Trend"
+                  lineDescription="Successful payments by month."
+                  lineData={revenueTrendData}
+                  lineValueSuffix=" NPR"
+                  lineStroke="#0f766e"
+                  lineTotalLabel="Paid revenue"
+                  lineTotalValue={analytics.paidRevenue}
+                  lineTotalSuffix=" NPR"
+                  lineLegendItems={[{ label: 'Successful payments', color: '#0f766e' }]}
+                  barTitle="Top Destination Demand"
+                  barDescription="Where bookings are concentrating right now."
+                  barData={destinationDemandData}
+                  barColor="#f59e0b"
+                  barTotalLabel="Bookings"
+                  barTotalValue={destinationDemandTotal}
+                  barLegendItems={[{ label: 'Booking count', color: '#f59e0b' }]}
+                />
+              </Suspense>
+
               <div className="analytics-grid">
                 <div className="card analytics-card">
-                  <h3> Revenue Summary</h3>
+                  <h3>Revenue Summary</h3>
                   <div className="analytics-item">
                     <span className="label">Total Revenue:</span>
                     <span className="value"> {Math.round(analytics.totalRevenue).toLocaleString()}</span>
@@ -1303,14 +1243,10 @@ export default function AgentDashboard() {
                 </div>
 
                 <div className="card analytics-card">
-                  <h3> Booking Summary</h3>
+                  <h3>Booking Summary</h3>
                   <div className="analytics-item">
                     <span className="label">Total Bookings:</span>
                     <span className="value">{bookingStats.total}</span>
-                  </div>
-                  <div className="analytics-item">
-                    <span className="label">Pending:</span>
-                    <span className="value warning">{bookingStats.pending}</span>
                   </div>
                   <div className="analytics-item">
                     <span className="label">Confirmed:</span>
@@ -1319,7 +1255,7 @@ export default function AgentDashboard() {
                 </div>
 
                 <div className="card analytics-card">
-                  <h3> Customer Insights</h3>
+                  <h3>Customer Insights</h3>
                   <div className="analytics-item">
                     <span className="label">Unique Customers:</span>
                     <span className="value">{customers.length}</span>
@@ -1337,7 +1273,7 @@ export default function AgentDashboard() {
 
               <div className="analytics-tables">
                 <div className="card">
-                  <h3> Top Customers</h3>
+                  <h3>Top Customers</h3>
                   {customers.length === 0 ? (
                     <p className="empty-state">No customer data yet.</p>
                   ) : (
@@ -1365,7 +1301,7 @@ export default function AgentDashboard() {
                 </div>
 
                 <div className="card">
-                  <h3> Recent Payments</h3>
+                  <h3>Recent Payments</h3>
                   {payments.length === 0 ? (
                     <p className="empty-state">No payment data yet.</p>
                   ) : (

@@ -1,12 +1,45 @@
 from django.urls import path
-from .views import CreateAgentView, LoginView, LogoutView, MeView, RegisterView, UserListView
+from .views import (
+	AdminAnalyticsView,
+	AdminAuditLogListView,
+	AgencyActivateView,
+	AgencyDeactivateView,
+	AgencyDeleteView,
+	AgencyListView,
+	CreateAgentView,
+	ForgotPasswordView,
+	LoginView,
+	LogoutView,
+	MeView,
+	PublicAgencyListView,
+	RegisterView,
+	ResetPasswordView,
+	UserActivateView,
+	UserDeactivateView,
+	UserDeleteView,
+	UserListView,
+	VerifyOTPView,
+)
 
 urlpatterns = [
 	path('register/', RegisterView.as_view(), name='register'),
 	path('login/', LoginView.as_view(), name='login'),
+	path('forgot-password/', ForgotPasswordView.as_view(), name='forgot_password'),
+	path('reset-password/', ResetPasswordView.as_view(), name='reset_password'),
+	path('verify-otp/', VerifyOTPView.as_view(), name='verify_otp'),
 	path('logout/', LogoutView.as_view(), name='logout'),
 	path('me/', MeView.as_view(), name='me'),
 	path('agents/create/', CreateAgentView.as_view(), name='create_agent'),
 	path('users/', UserListView.as_view(), name='user_list'),
+	path('users/<int:user_id>/deactivate/', UserDeactivateView.as_view(), name='user_deactivate'),
+	path('users/<int:user_id>/activate/', UserActivateView.as_view(), name='user_activate'),
+	path('users/<int:user_id>/', UserDeleteView.as_view(), name='user_delete'),
+	path('agencies/', AgencyListView.as_view(), name='agency_list'),
+	path('agencies/public/', PublicAgencyListView.as_view(), name='public_agency_list'),
+	path('agencies/<int:agency_id>/deactivate/', AgencyDeactivateView.as_view(), name='agency_deactivate'),
+	path('agencies/<int:agency_id>/activate/', AgencyActivateView.as_view(), name='agency_activate'),
+	path('agencies/<int:agency_id>/', AgencyDeleteView.as_view(), name='agency_delete'),
+	path('admin/analytics/', AdminAnalyticsView.as_view(), name='admin_analytics'),
+	path('admin/audit-logs/', AdminAuditLogListView.as_view(), name='admin_audit_logs'),
 ]
  

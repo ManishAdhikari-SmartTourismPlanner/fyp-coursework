@@ -1,6 +1,7 @@
 ﻿import { useState, useEffect } from 'react'
 import { useNavigate, useLocation } from 'react-router-dom'
 import { fetchPackages } from '../services/tourism'
+import { fetchPublicAgencies } from '../services/auth'
 
 export default function PackagesBrowsePage() {
   const navigate = useNavigate()
@@ -11,18 +12,40 @@ export default function PackagesBrowsePage() {
   const [destinationFilter, setDestinationFilter] = useState(location.state?.destinationId || '')
   const [priceFilter, setPriceFilter] = useState('all')
   const [typeFilter, setTypeFilter] = useState('all')
+  const [agentFilter, setAgentFilter] = useState(location.state?.agentId || '')
   const [sortBy, setSortBy] = useState('price-low')
+  const [agencies, setAgencies] = useState([])
+
+  useEffect(() => {
+    loadAgencies()
+  }, [])
 
   useEffect(() => {
     loadPackages()
-  }, [destinationFilter, priceFilter, typeFilter])
+  }, [destinationFilter, priceFilter, typeFilter, agentFilter])
+
+  async function loadAgencies() {
+    try {
+      const data = await fetchPublicAgencies()
+      setAgencies(Array.isArray(data) ? data : [])
+    } catch {
+      setAgencies([])
+    }
+  }
 
   async function loadPackages() {
     setLoading(true)
     setError('')
     try {
+      if (!agentFilter) {
+        setPackages([])
+        setLoading(false)
+        return
+      }
+
       const params = {
         ...(destinationFilter && { destination: destinationFilter }),
+        created_by: agentFilter,
         ordering: '-created_at'
       }
       
@@ -104,7 +127,24 @@ export default function PackagesBrowsePage() {
 
         <div className="dashboard-header">
           <h1> Browse Packages</h1>
-          <p>Find and compare packages that fit your budget and preferences</p>
+          <p>Select an agent first, then compare the packages they created.</p>
+        </div>
+
+        <div className="card" style={{ marginBottom: '18px' }}>
+          <div className="filter-group" style={{ marginBottom: 0 }}>
+            <label>Choose Agent</label>
+            <select
+              value={agentFilter}
+              onChange={(e) => setAgentFilter(e.target.value)}
+              className="filter-select"
+            >
+              <option value="">Select an agent</option>
+              {agencies.map((agency) => (
+                <option key={agency.id} value={agency.id}>{agency.username}</option>
+              ))}
+            </select>
+          </div>
+          {!agentFilter && <p className="empty-state" style={{ marginTop: '12px' }}>Choose an agent to load their packages.</p>}
         </div>
 
         {/* Filters Section */}
@@ -165,16 +205,13 @@ export default function PackagesBrowsePage() {
             {getSortedAndFilteredPackages().map((pkg) => {
               const priceCategory = getPriceCategory(pkg.price_npr)
               const destinationName = pkg.destination?.name || pkg.destination_name || 'Destination'
+              const agencyName = pkg.created_by?.username || pkg.created_by_username || 'Travel agency'
               const packageDescription = pkg.description || 'Explore this package and check full details on the next page.'
               const includesPreview = pkg.includes
                 ? pkg.includes.split('').filter(Boolean).slice(0, 2).join(', ').substring(0, 80) + '...'
                 : 'See details'
               return (
-                <div
-                  key={pkg.id}
-                  className={`package-card ${pkg.package_type === 'deluxe' ? 'premium' : 'standard'}`}
-                  onClick={() => handlePackageClick(pkg)}
-                >
+                <div key={pkg.id} className={`package-card ${pkg.package_type === 'deluxe' ? 'premium' : 'standard'}`} onClick={() => handlePackageClick(pkg)}>
                   {/* Type Badge */}
                   <div className="package-type-badge">
                     {getPackageTypeLabel(pkg.package_type)}
@@ -191,6 +228,10 @@ export default function PackagesBrowsePage() {
                       <h3>{pkg.title}</h3>
                       <p className="destination-name"> {destinationName}</p>
                     </div>
+
+                    <p className="package-description" style={{ marginTop: '-2px', marginBottom: '10px' }}>
+                      Offered by {agencyName}
+                    </p>
 
                     {/* Description */}
                     <p className="package-description">
@@ -222,7 +263,7 @@ export default function PackagesBrowsePage() {
 
                     {/* CTA Button */}
                     <button className="btn-view-package">
-                      View & Book 
+                      View & Book
                     </button>
                   </div>
                 </div>

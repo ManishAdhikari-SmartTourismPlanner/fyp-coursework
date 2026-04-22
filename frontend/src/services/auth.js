@@ -87,6 +87,43 @@ export async function loginWithUsername(username, password) {
   return data;
 }
 
+export async function requestPasswordReset(email) {
+  return request('/api/auth/forgot-password/', {
+    method: 'POST',
+    body: JSON.stringify({ email }),
+  });
+}
+
+export async function resetPasswordWithOtp(challengeId, code, newPassword, confirmPassword) {
+  return request('/api/auth/reset-password/', {
+    method: 'POST',
+    body: JSON.stringify({
+      challenge_id: challengeId,
+      code,
+      new_password: newPassword,
+      confirm_password: confirmPassword,
+    }),
+  });
+}
+
+export async function verifyRegistrationOtp(challengeId, code, options = {}) {
+  const { autoLogin = true } = options
+  const data = await request('/api/auth/verify-otp/', {
+    method: 'POST',
+    body: JSON.stringify({ challenge_id: challengeId, code }),
+  });
+
+  if (autoLogin) {
+    tokenStore.setSession({
+      access: data.access,
+      refresh: data.refresh,
+      user: data.user,
+    });
+  }
+
+  return data;
+}
+
 export async function fetchMe() {
   const access = tokenStore.getAccess();
   if (!access) {
@@ -99,6 +136,30 @@ export async function fetchMe() {
       Authorization: `Bearer ${access}`,
     },
   });
+}
+
+export async function updateProfile(payload) {
+  const access = tokenStore.getAccess();
+  if (!access) {
+    throw new Error('You are not logged in.');
+  }
+
+  const data = await request('/api/auth/me/', {
+    method: 'PATCH',
+    headers: {
+      Authorization: `Bearer ${access}`,
+    },
+    body: JSON.stringify(payload),
+  });
+
+  const current = tokenStore.getUser() || {};
+  tokenStore.setSession({
+    access: tokenStore.getAccess(),
+    refresh: tokenStore.getRefresh(),
+    user: { ...current, ...data },
+  });
+
+  return data;
 }
 
 export async function logoutSession() {
@@ -133,8 +194,109 @@ export async function createAgent(payload, accessToken) {
   });
 }
 
+export async function createAgency(payload, accessToken) {
+  return createAgent(payload, accessToken);
+}
+
 export async function fetchUsers(accessToken) {
   return request('/api/auth/users/', {
+    method: 'GET',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+    },
+  });
+}
+
+export async function deactivateUser(userId, accessToken) {
+  return request(`/api/auth/users/${userId}/deactivate/`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+    },
+  });
+}
+
+export async function activateUser(userId, accessToken) {
+  return request(`/api/auth/users/${userId}/activate/`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+    },
+  });
+}
+
+export async function deleteUser(userId, accessToken) {
+  return request(`/api/auth/users/${userId}/`, {
+    method: 'DELETE',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+    },
+  });
+}
+
+export async function updateUser(userId, payload, accessToken) {
+  return request(`/api/auth/users/${userId}/`, {
+    method: 'PATCH',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+    },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function fetchAgencies(accessToken) {
+  return request('/api/auth/agencies/', {
+    method: 'GET',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+    },
+  });
+}
+
+export async function fetchPublicAgencies() {
+  const access = tokenStore.getAccess();
+  if (!access) {
+    throw new Error('You are not logged in.');
+  }
+
+  return request('/api/auth/agencies/public/', {
+    method: 'GET',
+    headers: {
+      Authorization: `Bearer ${access}`,
+    },
+  });
+}
+
+export async function deleteAgency(agencyId, accessToken) {
+  return request(`/api/auth/agencies/${agencyId}/`, {
+    method: 'DELETE',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+    },
+  });
+}
+
+export async function updateAgency(agencyId, payload, accessToken) {
+  return request(`/api/auth/agencies/${agencyId}/`, {
+    method: 'PATCH',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+    },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function fetchAdminAnalytics(accessToken) {
+  return request('/api/auth/admin/analytics/', {
+    method: 'GET',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+    },
+  });
+}
+
+export async function fetchAuditLogs(accessToken) {
+  return request('/api/auth/admin/audit-logs/', {
     method: 'GET',
     headers: {
       Authorization: `Bearer ${accessToken}`,
