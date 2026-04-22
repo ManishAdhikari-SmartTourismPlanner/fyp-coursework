@@ -2,27 +2,53 @@ from rest_framework import viewsets, filters, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, IsAuthenticatedOrReadOnly, BasePermission
-from rest_framework.exceptions import ValidationError
+from rest_framework.exceptions import PermissionDenied, ValidationError
 from django_filters.rest_framework import DjangoFilterBackend
 from django.utils import timezone
 from django.urls import reverse
 from django.conf import settings
+from django.core.mail import send_mail
 from django.db import transaction
+from django.db.models.deletion import ProtectedError
 from datetime import timedelta
 from uuid import uuid4
 
 from .models import (
-    Destination, OfflineMap, Package, PackageDeparture,
-    Booking, Payment, Review
+    Destination, Package, PackageDeparture,
+    Booking, Payment
 )
 from .serializers import (
     DestinationListSerializer, DestinationDetailSerializer,
-    OfflineMapSerializer, PackageListSerializer, PackageDetailSerializer,
+    PackageListSerializer, PackageDetailSerializer,
     PackageDepartureSerializer, BookingListSerializer, BookingDetailSerializer,
-    PaymentSerializer, ReviewSerializer
+    PaymentSerializer
 )
-from .esewa_gateway import ESewaPaymentGateway
 from .khalti_gateway import KhaltiPaymentGateway
+from users.models import UserProfile
+
+
+def _notify_package_cancelled(booking, package):
+    if not booking.tourist.email:
+        return
+
+    payment = getattr(booking, 'payment', None)
+    refund_note = ''
+    if payment and payment.method == Payment.METHOD_KHALTI and payment.status == Payment.STATUS_SUCCESS:
+        refund_note = '\nA refund has been queued for your Khalti payment. Admin will process it shortly.'
+
+    message = (
+        f'Hello {booking.tourist.username},\n\n'
+        f'Your booking {booking.booking_code} has been cancelled because the agency cancelled package "{package.title}".'
+        f'{refund_note}\n\n'
+        'Please contact support if you need assistance.'
+    )
+    send_mail(
+        'Smart Tourism: Package Cancelled',
+        message,
+        getattr(settings, 'DEFAULT_FROM_EMAIL', 'no-reply@smarttourism.local'),
+        [booking.tourist.email],
+        fail_silently=True,
+    )
 
 
 def _release_booking_seats(booking):
@@ -73,6 +99,15 @@ def _expire_pending_bookings_for_queryset(queryset):
             continue
 
 
+def _close_past_departures(scope=None):
+    today = timezone.now().date()
+    queryset = scope if scope is not None else PackageDeparture.objects.all()
+    queryset.filter(
+        status=PackageDeparture.STATUS_OPEN,
+        departure_date__lt=today,
+    ).update(status=PackageDeparture.STATUS_CLOSED)
+
+
 class IsAgentOrAdminOrReadOnly(BasePermission):
     def has_permission(self, request, view):
         if request.method in ['GET', 'HEAD', 'OPTIONS']:
@@ -84,6 +119,17 @@ class IsAgentOrAdminOrReadOnly(BasePermission):
             and hasattr(request.user, 'profile')
             and request.user.profile.role in ['agent', 'admin']
         )
+
+    def has_object_permission(self, request, view, obj):
+        # Read permissions allowed to any request
+        if request.method in ['GET', 'HEAD', 'OPTIONS']:
+            return True
+
+        # Write permissions - any authenticated agent or admin can edit/delete
+        if hasattr(request.user, 'profile') and request.user.profile.role in ['agent', 'admin']:
+            return True
+
+        return False
 
 
 class DestinationViewSet(viewsets.ModelViewSet):
@@ -104,10 +150,17 @@ class DestinationViewSet(viewsets.ModelViewSet):
     ordering = ['name']
 
     def get_queryset(self):
-        user = self.request.user
-        # All users (agent, admin, tourist) see only active destinations
-        # Agents can still create/edit/delete, but manage only active destinations
-        return Destination.objects.filter(is_active=True)
+        return Destination.objects.filter(is_active=True).order_by('name')
+
+    def list(self, request, *args, **kwargs):
+        queryset = self.filter_queryset(self.get_queryset())
+        page = self.paginate_queryset(queryset)
+        if page is not None:
+            serializer = self.get_serializer(page, many=True)
+            return self.get_paginated_response(serializer.data)
+
+        serializer = self.get_serializer(queryset, many=True)
+        return Response(serializer.data)
 
     def get_serializer_class(self):
         if self.action in ['retrieve', 'create', 'update', 'partial_update']:
@@ -115,10 +168,41 @@ class DestinationViewSet(viewsets.ModelViewSet):
         return DestinationListSerializer
 
     def perform_create(self, serializer):
-        destination_id = serializer.validated_data.get('destination_id') or self.request.data.get('destination_id')
-        if destination_id and Package.objects.filter(destination_id=destination_id).count() >= 3:
-            raise ValidationError({'destination_id': 'A maximum of 3 packages is allowed per destination.'})
         serializer.save(created_by=self.request.user)
+
+    def _ensure_upper_mustang_manage_permission(self, instance):
+        is_upper_mustang = (instance.name or '').strip().lower() == 'upper mustang'
+        if not is_upper_mustang:
+            return
+
+        user_role = getattr(self.request.user.profile, 'role', '')
+        if user_role == UserProfile.ROLE_ADMIN:
+            return
+
+        if instance.created_by_id != self.request.user.id:
+            raise PermissionDenied('Only the creator can edit or delete Upper Mustang.')
+
+    def perform_update(self, serializer):
+        instance = self.get_object()
+        self._ensure_upper_mustang_manage_permission(instance)
+        serializer.save()
+
+    def perform_destroy(self, instance):
+        self._ensure_upper_mustang_manage_permission(instance)
+        try:
+            instance.delete()
+        except ProtectedError:
+            # Keep booking/payment history intact by archiving instead of hard-deleting.
+            with transaction.atomic():
+                instance.is_active = False
+                instance.save(update_fields=['is_active'])
+
+                packages_qs = Package.objects.filter(destination=instance)
+                packages_qs.update(is_active=False)
+                PackageDeparture.objects.filter(
+                    package__in=packages_qs,
+                    status=PackageDeparture.STATUS_OPEN,
+                ).update(status=PackageDeparture.STATUS_CANCELLED)
 
     @action(detail=True, methods=['get'])
     def packages(self, request, pk=None):
@@ -126,54 +210,6 @@ class DestinationViewSet(viewsets.ModelViewSet):
         destination = self.get_object()
         packages = destination.packages.all()
         serializer = PackageListSerializer(packages, many=True)
-        return Response(serializer.data)
-
-    @action(detail=True, methods=['get'])
-    def reviews(self, request, pk=None):
-        """Get all reviews for a destination"""
-        destination = self.get_object()
-        reviews = destination.reviews.all()
-        serializer = ReviewSerializer(reviews, many=True)
-        return Response(serializer.data)
-
-
-class OfflineMapViewSet(viewsets.ModelViewSet):
-    """ViewSet for offline map management"""
-    queryset = OfflineMap.objects.all()
-    serializer_class = OfflineMapSerializer
-    permission_classes = [IsAgentOrAdminOrReadOnly]
-    filter_backends = [DjangoFilterBackend, filters.OrderingFilter]
-    filterset_fields = ['destination', 'is_active']
-    ordering_fields = ['destination', 'created_at']
-    ordering = ['-created_at']
-
-    def perform_create(self, serializer):
-        instance = serializer.save()
-        # Keep one active version per map title and destination.
-        if instance.is_active:
-            OfflineMap.objects.filter(
-                destination=instance.destination,
-                title=instance.title,
-                is_active=True,
-            ).exclude(id=instance.id).update(is_active=False)
-
-    @action(detail=False, methods=['get'])
-    def latest(self, request):
-        """Return latest active map versions by title for a destination."""
-        destination_id = request.query_params.get('destination')
-        if not destination_id:
-            return Response({'error': 'destination query param is required'}, status=status.HTTP_400_BAD_REQUEST)
-
-        maps = OfflineMap.objects.filter(destination_id=destination_id, is_active=True).order_by('title', '-created_at')
-        latest_maps = []
-        seen_titles = set()
-        for item in maps:
-            if item.title in seen_titles:
-                continue
-            seen_titles.add(item.title)
-            latest_maps.append(item)
-
-        serializer = OfflineMapSerializer(latest_maps, many=True)
         return Response(serializer.data)
 
 
@@ -185,7 +221,7 @@ class PackageViewSet(viewsets.ModelViewSet):
     queryset = Package.objects.all()
     permission_classes = [IsAgentOrAdminOrReadOnly]
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
-    filterset_fields = ['destination', 'package_type', 'tour_type']
+    filterset_fields = ['destination', 'package_type', 'tour_type', 'created_by']
     search_fields = ['title', 'description', 'destination__name']
     ordering_fields = ['price_npr', 'duration_days', 'created_at']
     ordering = ['price_npr']
@@ -204,11 +240,87 @@ class PackageViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         serializer.save(created_by=self.request.user)
 
+    def _ensure_package_manage_permission(self, package):
+        user_role = getattr(self.request.user.profile, 'role', '')
+        if user_role == UserProfile.ROLE_ADMIN:
+            return
+        if user_role == UserProfile.ROLE_AGENT and package.created_by_id == self.request.user.id:
+            return
+        raise PermissionDenied('You can manage only packages created by your account.')
+
+    def perform_update(self, serializer):
+        self._ensure_package_manage_permission(self.get_object())
+        serializer.save()
+
+    def perform_destroy(self, instance):
+        self._ensure_package_manage_permission(instance)
+        try:
+            instance.delete()
+        except ProtectedError as exc:
+            raise ValidationError({'detail': 'This package cannot be deleted because related bookings exist. Cancel the package instead.'}) from exc
+
+    @action(detail=True, methods=['post'])
+    def cancel_package(self, request, pk=None):
+        package = self.get_object()
+        user_role = getattr(request.user.profile, 'role', '')
+        if user_role not in ['agent', 'admin']:
+            return Response({'error': 'Only agents/admin can cancel packages.'}, status=status.HTTP_403_FORBIDDEN)
+
+        if user_role == 'agent' and package.created_by_id != request.user.id:
+            return Response({'error': 'You can cancel only your own packages.'}, status=status.HTTP_403_FORBIDDEN)
+
+        if not package.is_active:
+            return Response({'message': 'Package is already cancelled.', 'package_id': package.id})
+
+        with transaction.atomic():
+            package.is_active = False
+            package.save(update_fields=['is_active'])
+
+            package.departures.filter(status=PackageDeparture.STATUS_OPEN).update(status=PackageDeparture.STATUS_CANCELLED)
+
+            affected_bookings = list(
+                Booking.objects.select_related('tourist', 'payment').filter(
+                    package=package,
+                    status__in=[Booking.STATUS_PENDING, Booking.STATUS_CONFIRMED, Booking.STATUS_RESCHEDULED],
+                )
+            )
+
+            cancelled_count = 0
+            refund_candidates = 0
+            for booking in affected_bookings:
+                if booking.departure_id:
+                    _release_booking_seats(booking)
+                booking.status = Booking.STATUS_CANCELLED
+                booking.cancellation_reason = Booking.CANCEL_REASON_USER
+                booking.save(update_fields=['status', 'cancellation_reason'])
+                cancelled_count += 1
+
+                payment = getattr(booking, 'payment', None)
+                if payment and payment.method == Payment.METHOD_KHALTI and payment.status == Payment.STATUS_SUCCESS:
+                    refund_candidates += 1
+
+                _notify_package_cancelled(booking, package)
+
+        return Response(
+            {
+                'message': 'Package cancelled successfully.',
+                'package_id': package.id,
+                'affected_bookings': cancelled_count,
+                'refund_candidates': refund_candidates,
+            },
+            status=status.HTTP_200_OK,
+        )
+
     @action(detail=True, methods=['get'])
     def departures(self, request, pk=None):
         """Get all departures for a package with available seats"""
         package = self.get_object()
-        departures = package.departures.filter(status__in=['open', 'active']).order_by('departure_date')
+        today = timezone.now().date()
+        _close_past_departures(package.departures.all())
+        departures = package.departures.filter(
+            status=PackageDeparture.STATUS_OPEN,
+            departure_date__gte=today,
+        ).order_by('departure_date')
         serializer = PackageDepartureSerializer(departures, many=True)
         return Response(serializer.data)
 
@@ -238,10 +350,33 @@ class PackageDepartureViewSet(viewsets.ModelViewSet):
     ordering_fields = ['departure_date']
     ordering = ['departure_date']
 
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        _close_past_departures(queryset)
+        return queryset
+
+    def perform_create(self, serializer):
+        departure_date = serializer.validated_data.get('departure_date')
+        status_value = serializer.validated_data.get('status', PackageDeparture.STATUS_OPEN)
+
+        if departure_date and departure_date < timezone.now().date() and status_value == PackageDeparture.STATUS_OPEN:
+            serializer.save(status=PackageDeparture.STATUS_CLOSED)
+            return
+
+        serializer.save()
+
     @action(detail=True, methods=['post'])
     def book_seats(self, request, pk=None):
         """Book seats in a departure"""
         departure = self.get_object()
+        if departure.departure_date < timezone.now().date():
+            if departure.status == PackageDeparture.STATUS_OPEN:
+                departure.status = PackageDeparture.STATUS_CLOSED
+                departure.save(update_fields=['status'])
+            return Response(
+                {'error': 'Cannot book past departures.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
         seats_needed = request.data.get('seats_needed', 1)
         
         if departure.available_seats < seats_needed:
@@ -264,7 +399,8 @@ class BookingViewSet(viewsets.ModelViewSet):
     """
     ViewSet for Booking management.
     Tourists can only see/manage their own bookings.
-    Admins/Agents can see all bookings.
+    Admins can see all bookings.
+    Agents can only see bookings for their own packages.
     """
     serializer_class = BookingListSerializer
     permission_classes = [IsAuthenticated]
@@ -275,14 +411,20 @@ class BookingViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         user = self.request.user
-        if user.profile.role in ['agent', 'admin']:
+        if user.profile.role == 'admin':
             queryset = Booking.objects.all()
             _expire_pending_bookings_for_queryset(queryset)
-            return Booking.objects.all()
+            return queryset
+
+        if user.profile.role == 'agent':
+            queryset = Booking.objects.filter(package__created_by=user)
+            _expire_pending_bookings_for_queryset(queryset)
+            return queryset
+
         # Tourists only see their own bookings
         queryset = Booking.objects.filter(tourist=user)
         _expire_pending_bookings_for_queryset(queryset)
-        return Booking.objects.filter(tourist=user)
+        return queryset
 
     def get_serializer_class(self):
         if self.action == 'retrieve':
@@ -298,6 +440,11 @@ class BookingViewSet(viewsets.ModelViewSet):
         with transaction.atomic():
             if departure:
                 locked_departure = PackageDeparture.objects.select_for_update().get(id=departure.id)
+                if locked_departure.departure_date < timezone.now().date():
+                    if locked_departure.status == PackageDeparture.STATUS_OPEN:
+                        locked_departure.status = PackageDeparture.STATUS_CLOSED
+                        locked_departure.save(update_fields=['status'])
+                    raise ValidationError({'departure_id': 'Selected departure date has already passed.'})
                 if locked_departure.status != 'open':
                     raise ValidationError({'departure_id': 'Selected departure is not open for booking.'})
                 if locked_departure.available_seats < travelers_count:
@@ -336,7 +483,13 @@ class BookingViewSet(viewsets.ModelViewSet):
     def cancel(self, request, pk=None):
         """Cancel a booking"""
         booking = self.get_object()
-        if booking.tourist != request.user and request.user.profile.role not in ['admin', 'agent']:
+        if request.user.profile.role == 'agent':
+            return Response(
+                {'error': 'Agents cannot cancel bookings directly. Cancel the package instead.'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        if booking.tourist != request.user and request.user.profile.role != 'admin':
             return Response(
                 {'error': 'You do not have permission to cancel this booking'},
                 status=status.HTTP_403_FORBIDDEN
@@ -489,6 +642,95 @@ class PaymentViewSet(viewsets.ModelViewSet):
 
         serializer.save()
 
+    @action(detail=False, methods=['get'])
+    def cancelled_package_refunds(self, request):
+        if request.user.profile.role != 'admin':
+            return Response({'error': 'Only admins can access refund queue.'}, status=status.HTTP_403_FORBIDDEN)
+
+        rows = []
+        refundable = Payment.objects.select_related('booking__tourist', 'booking__package').filter(
+            method=Payment.METHOD_KHALTI,
+            booking__package__is_active=False,
+            booking__status=Booking.STATUS_CANCELLED,
+            status__in=[Payment.STATUS_SUCCESS, Payment.STATUS_REFUNDED],
+        ).order_by('-created_at')
+
+        for payment in refundable:
+            rows.append({
+                'payment_id': payment.id,
+                'booking_id': payment.booking_id,
+                'booking_code': payment.booking.booking_code,
+                'package_id': payment.booking.package_id,
+                'package_title': payment.booking.package.title,
+                'tourist_id': payment.booking.tourist_id,
+                'tourist_username': payment.booking.tourist.username,
+                'tourist_email': payment.booking.tourist.email,
+                'amount_npr': float(payment.amount_npr),
+                'method': payment.method,
+                'status': payment.status,
+                'transaction_id': payment.transaction_id,
+                'can_refund': payment.status == Payment.STATUS_SUCCESS,
+                'created_at': payment.created_at,
+            })
+
+        return Response(rows, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'])
+    def refund_cancelled_package(self, request, pk=None):
+        if request.user.profile.role != 'admin':
+            return Response({'error': 'Only admins can refund cancelled packages.'}, status=status.HTTP_403_FORBIDDEN)
+
+        payment = self.get_object()
+        booking = payment.booking
+
+        if payment.method != Payment.METHOD_KHALTI:
+            return Response({'error': 'Only Khalti payments can be refunded from this action.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if payment.status == Payment.STATUS_REFUNDED:
+            return Response({'message': 'Payment is already refunded.'}, status=status.HTTP_200_OK)
+
+        if payment.status != Payment.STATUS_SUCCESS:
+            return Response({'error': 'Only successful payments can be refunded.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if booking.status != Booking.STATUS_CANCELLED or booking.package.is_active:
+            return Response({'error': 'Refund is allowed only for cancelled bookings of cancelled packages.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if not payment.transaction_id:
+            return Response({'error': 'Missing transaction ID for Khalti refund.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        refund = KhaltiPaymentGateway.refund_payment(payment.transaction_id)
+        if not refund.get('success'):
+            return Response({'error': refund.get('error', 'Refund failed.')}, status=status.HTTP_400_BAD_REQUEST)
+
+        payment.status = Payment.STATUS_REFUNDED
+        payment.save(update_fields=['status'])
+
+        if booking.tourist.email:
+            message = (
+                f'Hello {booking.tourist.username},\n\n'
+                f'Your payment for booking {booking.booking_code} has been refunded via Khalti.\n'
+                f'Amount: NPR {payment.amount_npr}\n\n'
+                'Thank you for your patience.'
+            )
+            send_mail(
+                'Smart Tourism: Refund Processed',
+                message,
+                getattr(settings, 'DEFAULT_FROM_EMAIL', 'no-reply@smarttourism.local'),
+                [booking.tourist.email],
+                fail_silently=True,
+            )
+
+        return Response(
+            {
+                'success': True,
+                'payment_id': payment.id,
+                'booking_code': booking.booking_code,
+                'refund_reference': refund.get('refund_reference', ''),
+                'status': payment.status,
+            },
+            status=status.HTTP_200_OK,
+        )
+
     @action(detail=False, methods=['post'])
     def initiate_khalti(self, request):
         """
@@ -619,183 +861,4 @@ class PaymentViewSet(viewsets.ModelViewSet):
         payment.save()
         return Response({'message': 'Payment confirmed', 'payment': PaymentSerializer(payment).data})
 
-    @action(detail=False, methods=['post'])
-    def initiate_esewa(self, request):
-        """
-        Initiate eSewa payment for a booking
-        
-        Request body:
-        {
-            "booking_id": <id>,
-            "amount_npr": <decimal>,
-            "frontend_url": "http://localhost:5173" (optional)
-        }
-        
-        Returns:
-        {
-            "payment_url": "https://esewa.com.np/api/epay/main/?...",
-            "transaction_uuid": "...",
-            "booking_code": "..."
-        }
-        """
-        try:
-            booking_id = request.data.get('booking_id')
-            amount_npr = request.data.get('amount_npr')
-            frontend_url = request.data.get('frontend_url')  # Pass from frontend
-            
-            if not booking_id or not amount_npr:
-                return Response(
-                    {'error': 'Missing booking_id or amount_npr'},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-            
-            booking = Booking.objects.get(id=booking_id, tourist=request.user)
-            if _expire_pending_booking_if_needed(booking):
-                return Response({'error': 'Booking expired after 5 minutes and was cancelled.'}, status=status.HTTP_400_BAD_REQUEST)
 
-            if booking.status != Booking.STATUS_PENDING:
-                return Response({'error': 'Only pending bookings can be paid.'}, status=status.HTTP_400_BAD_REQUEST)
-            
-            # Build callback URLs using frontend domain
-            # Try to use provided frontend_url, fallback to referrer, then backend
-            if not frontend_url:
-                # Try to get from referrer header
-                referer = request.META.get('HTTP_REFERER', '')
-                if referer:
-                    # Extract base URL from referrer (e.g., http://localhost:5173/booking)
-                    from urllib.parse import urlparse
-                    parsed = urlparse(referer)
-                    frontend_url = f"{parsed.scheme}://{parsed.netloc}"
-                else:
-                    # Fallback to backend URL (for API calls without referrer)
-                    protocol = 'https' if request.is_secure() else 'http'
-                    domain = request.get_host()
-                    frontend_url = f'{protocol}://{domain}'
-            
-            success_url = f'{frontend_url}/payment/esewa-success/'
-            failure_url = f'{frontend_url}/payment/esewa-failure/'
-            
-            # Initiate eSewa payment
-            esewa_result = ESewaPaymentGateway.initiate_payment(
-                booking_code=booking.booking_code,
-                amount_npr=amount_npr,
-                success_url=success_url,
-                failure_url=failure_url,
-                product_code=settings.ESEWA_MERCHANT_CODE,
-                frontend_url=frontend_url
-            )
-            
-            if not esewa_result['success']:
-                return Response(
-                    {'error': esewa_result.get('error', 'Failed to initiate eSewa payment')},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-            
-            # Create pending payment record
-            payment, _ = Payment.objects.get_or_create(
-                booking=booking,
-                defaults={
-                    'method': 'esewa',
-                    'amount_npr': amount_npr,
-                    'status': 'pending',
-                    'transaction_id': esewa_result['transaction_uuid'],
-                }
-            )
-            
-            return Response({
-                'success': True,
-                'payment_url': esewa_result['payment_url'],
-                'transaction_uuid': esewa_result['transaction_uuid'],
-                'booking_code': booking.booking_code,
-                'amount': float(amount_npr),
-            })
-            
-        except Booking.DoesNotExist:
-            return Response(
-                {'error': 'Booking not found'},
-                status=status.HTTP_404_NOT_FOUND
-            )
-        except Exception as e:
-            return Response(
-                {'error': str(e)},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-    @action(detail=False, methods=['get'])
-    def esewa_callback(self, request):
-        """
-        Handle eSewa payment callback
-        
-        eSewa redirects to this endpoint with query parameters:
-        ?oid=<booking_code>&amt=<amount>&refId=<transaction_ref>&rid=<request_id>&pid=<product_id>&scd=<merchant_code>
-        """
-        try:
-            # Get query parameters
-            query_params = request.query_params.dict()
-            
-            # Process callback
-            callback_result = ESewaPaymentGateway.handle_payment_callback(query_params)
-            
-            if not callback_result['success']:
-                return Response(
-                    callback_result,
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-            
-            # Update payment record
-            booking_code = callback_result['booking_code']
-            transaction_id = callback_result['transaction_id']
-            
-            try:
-                booking = Booking.objects.get(booking_code=booking_code)
-                if _expire_pending_booking_if_needed(booking):
-                    return Response({'error': 'Payment arrived after expiry. Booking already cancelled.'}, status=status.HTTP_400_BAD_REQUEST)
-                payment = Payment.objects.get(booking=booking)
-                
-                # Update payment status
-                payment.status = 'success'
-                payment.transaction_id = transaction_id
-                payment.paid_at = timezone.now()
-                payment.save()
-                
-                # Update booking status
-                booking.status = 'confirmed'
-                booking.save()
-                
-                return Response({
-                    'success': True,
-                    'message': 'Payment verified and booking confirmed',
-                    'booking_code': booking_code,
-                    'booking_status': booking.status,
-                })
-                
-            except (Booking.DoesNotExist, Payment.DoesNotExist):
-                return Response(
-                    {'error': 'Booking or payment not found'},
-                    status=status.HTTP_404_NOT_FOUND
-                )
-            
-        except Exception as e:
-            return Response(
-                {'error': str(e), 'message': 'Callback processing failed'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-
-class ReviewViewSet(viewsets.ModelViewSet):
-    """
-    ViewSet for reviews and ratings.
-    Users can only review destinations they've booked.
-    """
-    serializer_class = ReviewSerializer
-    permission_classes = [IsAuthenticated]
-    filter_backends = [DjangoFilterBackend, filters.OrderingFilter]
-    filterset_fields = ['destination', 'rating']
-    ordering_fields = ['rating', 'created_at']
-    ordering = ['-created_at']
-
-    def get_queryset(self):
-        return Review.objects.all()
-
-    def perform_create(self, serializer):
-        serializer.save(tourist=self.request.user)

@@ -105,3 +105,35 @@ class KhaltiPaymentGateway:
             'amount_paisa': data.get('total_amount') or data.get('amount'),
             'raw': data,
         }
+
+    @staticmethod
+    def refund_payment(transaction_id, amount_npr=None, reason='Package cancelled by agency'):
+        use_mock = getattr(settings, 'KHALTI_USE_MOCK', False) and not getattr(settings, 'KHALTI_PRODUCTION_MODE', False)
+        if use_mock or str(transaction_id).startswith('MOCK_'):
+            return {
+                'success': True,
+                'refund_reference': f'REFUND_{uuid4().hex[:10].upper()}',
+                'raw': {'source': 'mock', 'transaction_id': transaction_id},
+            }
+
+        payload = {}
+
+        response = requests.post(
+            f"{settings.KHALTI_BASE_URL}/api/merchant-transaction/{transaction_id}/refund/",
+            headers=KhaltiPaymentGateway._headers(),
+            json=payload,
+            timeout=20,
+        )
+        data = response.json() if response.text else {}
+        if response.status_code >= 400:
+            return {
+                'success': False,
+                'error': data.get('detail') or data.get('message') or str(data) or 'Failed to refund Khalti payment.',
+                'raw': data,
+            }
+
+        return {
+            'success': True,
+            'refund_reference': data.get('refund_id') or data.get('reference') or data.get('idx') or '',
+            'raw': data,
+        }

@@ -1,5 +1,6 @@
 
 import os
+import sys
 from pathlib import Path
 from datetime import timedelta
 
@@ -62,8 +63,20 @@ CORS_ALLOWED_ORIGINS = [
     "http://localhost:5174",
 ]
 
-EMAIL_BACKEND = os.getenv('EMAIL_BACKEND', 'django.core.mail.backends.console.EmailBackend')
-DEFAULT_FROM_EMAIL = os.getenv('DEFAULT_FROM_EMAIL', 'no-reply@smarttourism.local')
+EMAIL_HOST_USER = os.getenv('EMAIL_HOST_USER', '')
+EMAIL_HOST_PASSWORD = os.getenv('EMAIL_HOST_PASSWORD', '')
+RUNNING_TESTS = 'test' in sys.argv
+EMAIL_BACKEND = os.getenv(
+    'EMAIL_BACKEND',
+    'django.core.mail.backends.console.EmailBackend'
+    if RUNNING_TESTS
+    else ('auth.email_backends.CertifiSMTPEmailBackend' if EMAIL_HOST_USER and EMAIL_HOST_PASSWORD else 'django.core.mail.backends.console.EmailBackend'),
+)
+EMAIL_HOST = os.getenv('EMAIL_HOST', 'smtp.gmail.com')
+EMAIL_PORT = int(os.getenv('EMAIL_PORT', '587'))
+EMAIL_USE_TLS = os.getenv('EMAIL_USE_TLS', 'True').lower() == 'true'
+EMAIL_USE_SSL = os.getenv('EMAIL_USE_SSL', 'False').lower() == 'true'
+DEFAULT_FROM_EMAIL = os.getenv('DEFAULT_FROM_EMAIL', EMAIL_HOST_USER or 'no-reply@smarttourism.local')
 
 ROOT_URLCONF = 'auth.urls'
 
@@ -162,12 +175,6 @@ SIMPLE_JWT = {
     'ROTATE_REFRESH_TOKENS': True,
     'BLACKLIST_AFTER_ROTATION': True,
 }
-
-# eSewa Payment Gateway Configuration
-ESEWA_MERCHANT_CODE = os.getenv('ESEWA_MERCHANT_CODE', 'EPAYTEST')
-ESEWA_MERCHANT_SECRET = os.getenv('ESEWA_MERCHANT_SECRET', '8gBm/:&EnhH.1/q')
-ESEWA_PRODUCTION_MODE = os.getenv('ESEWA_PRODUCTION_MODE', 'False').lower() == 'true'
-ESEWA_USE_MOCK = os.getenv('ESEWA_USE_MOCK', 'False').lower() == 'true'
 
 # Khalti Payment Gateway Configuration
 KHALTI_SECRET_KEY = os.getenv('KHALTI_SECRET_KEY', '')

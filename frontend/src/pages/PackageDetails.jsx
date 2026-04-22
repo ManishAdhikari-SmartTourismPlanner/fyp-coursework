@@ -1,6 +1,7 @@
 ﻿import { useState, useEffect, useMemo } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { fetchPackageDetail, fetchPackageDepartures } from '../services/tourism'
+import { fetchPublicAgencies } from '../services/auth'
 
 export default function PackageDetailsPage() {
   const { id } = useParams()
@@ -12,6 +13,8 @@ export default function PackageDetailsPage() {
   const [selectedDeparture, setSelectedDeparture] = useState(null)
   const [travelersCount, setTravelersCount] = useState(1)
   const [activeTab, setActiveTab] = useState('overview')
+  const [agencies, setAgencies] = useState([])
+  const [selectedAgentId, setSelectedAgentId] = useState('')
 
   useEffect(() => {
     loadPackageDetails()
@@ -21,11 +24,14 @@ export default function PackageDetailsPage() {
     setLoading(true)
     setError('')
     try {
-      const [pkgData, departuresData] = await Promise.all([
+      const [pkgData, departuresData, agenciesData] = await Promise.all([
         fetchPackageDetail(id),
         fetchPackageDepartures(id),
+        fetchPublicAgencies(),
       ])
       setPkg(pkgData)
+      setSelectedAgentId(String(pkgData.created_by || ''))
+      setAgencies(Array.isArray(agenciesData) ? agenciesData : [])
       
       setDepartures(Array.isArray(departuresData) ? departuresData : departuresData?.results || pkgData.departures || [])
     } catch (err) {
@@ -65,11 +71,31 @@ export default function PackageDetailsPage() {
       state: {
         packageId: pkg.id,
         packageTitle: pkg.title,
+        packageAgentId: pkg.created_by || selectedAgentId || '',
+        packageAgentName: agencyName,
         departureId: selectedDeparture.id,
         departureDate: selectedDeparture.departure_date,
         price: pkg.price_npr,
         travelersCount,
       }
+    })
+  }
+
+  function handleAgentSwitch() {
+    if (!selectedAgentId) {
+      setError('Please select an agent first.')
+      return
+    }
+
+    if (String(pkg.created_by || '') === String(selectedAgentId)) {
+      return
+    }
+
+    navigate('/packages', {
+      state: {
+        agentId: selectedAgentId,
+        destinationId: pkg.destination?.id,
+      },
     })
   }
 
@@ -88,6 +114,7 @@ export default function PackageDetailsPage() {
   if (!pkg) return <div className="dashboard"><p>Package not found</p></div>
 
   const priceCategory = getPriceCategory(pkg.price_npr)
+  const agencyName = pkg.created_by?.username || pkg.created_by_username || 'Travel agency'
 
   return (
     <div className="dashboard package-details-page">
@@ -106,6 +133,7 @@ export default function PackageDetailsPage() {
             </div>
             <h1>{pkg.title}</h1>
             <p className="package-destination">{pkg.destination.name} • {pkg.destination.province}</p>
+            <p className="package-destination">Offered by {agencyName}</p>
             <p className="package-hero-description">{pkg.description}</p>
 
             <div className="package-hero-meta">
@@ -148,6 +176,32 @@ export default function PackageDetailsPage() {
                     <div className="card-text">
                       <strong>Destination</strong>
                       <p>{pkg.destination.name}</p>
+                    </div>
+                  </div>
+                  <div className="overview-card">
+                    <div className="card-text">
+                      <strong>Agency</strong>
+                      <p>{agencyName}</p>
+                      <div style={{ marginTop: '10px' }}>
+                        <select
+                          value={selectedAgentId}
+                          onChange={(e) => setSelectedAgentId(e.target.value)}
+                          className="filter-select"
+                        >
+                          <option value="">Choose Agent</option>
+                          {agencies.map((agency) => (
+                            <option key={agency.id} value={agency.id}>{agency.username}</option>
+                          ))}
+                        </select>
+                      </div>
+                      <button
+                        type="button"
+                        className="btn-secondary"
+                        style={{ marginTop: '8px' }}
+                        onClick={handleAgentSwitch}
+                      >
+                        Switch to Selected Agent
+                      </button>
                     </div>
                   </div>
                   <div className="overview-card">

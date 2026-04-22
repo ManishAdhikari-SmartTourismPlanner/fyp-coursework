@@ -230,7 +230,6 @@ class Booking(TimeStampedModel):
 
 class Payment(TimeStampedModel):
 	METHOD_KHALTI = 'khalti'
-	METHOD_ESEWA = 'esewa'
 	METHOD_CASH = 'cash'
 
 	STATUS_PENDING = 'pending'
@@ -240,7 +239,6 @@ class Payment(TimeStampedModel):
 
 	METHOD_CHOICES = [
 		(METHOD_KHALTI, 'Khalti'),
-		(METHOD_ESEWA, 'eSewa'),
 		(METHOD_CASH, 'Cash'),
 	]
 

@@ -28,7 +28,7 @@ export default function KhaltiSuccessPage() {
         setStatus('success')
         setMessage('Khalti payment successful. Your booking is confirmed.')
         setBookingCode(result.booking_code)
-        setTimeout(() => navigate('/tourist'), 2500)
+        setTimeout(() => navigate(`/booking-confirmation?code=${result.booking_code}`), 2500)
       } else {
         setStatus('error')
         setMessage(result.message || result.error || 'Khalti payment verification failed.')

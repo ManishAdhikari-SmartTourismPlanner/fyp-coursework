@@ -3,17 +3,17 @@ import { useAuth } from './context/AuthContext'
 import ProtectedRoute from './components/ProtectedRoute'
 import LoginPage from './pages/LoginPage'
 import RegisterPage from './pages/RegisterPage'
+import ForgotPasswordPage from './pages/ForgotPasswordPage'
 import TouristDashboard from './pages/TouristDashboard'
 import AgentDashboard from './pages/AgentDashboard'
 import AdminDashboard from './pages/AdminDashboard'
+import ProfilePage from './pages/ProfilePage'
 import DestinationSearch from './pages/DestinationSearch'
 import PackagesBrowse from './pages/PackagesBrowse'
 import PackageDetails from './pages/PackageDetails'
 import BookingFlow from './pages/BookingFlow'
-import OfflineMapsPage from './pages/OfflineMapsPage'
-import ESewaSuccessPage from './pages/ESewaSuccessPage'
-import ESewaFailurePage from './pages/ESewaFailurePage'
-import MockESewaPayment from './pages/MockESewaPayment'
+import AgenciesPage from './pages/AgenciesPage'
+import BookingConfirmationPage from './pages/BookingConfirmationPage'
 import KhaltiSuccessPage from './pages/KhaltiSuccessPage'
 import './App.css'
 
@@ -29,18 +29,18 @@ function App() {
       <Route path="/" element={<Navigate to={user ? `/${user.role}` : '/login'} replace />} />
       <Route path="/login" element={user ? <Navigate to={`/${user.role}`} replace /> : <LoginPage />} />
       <Route path="/register" element={user ? <Navigate to={`/${user.role}`} replace /> : <RegisterPage />} />
+      <Route path="/forgot-password" element={user ? <Navigate to={`/${user.role}`} replace /> : <ForgotPasswordPage />} />
       
       {/* Tourism Pages - Available to authenticated users */}
       <Route path="/destinations" element={<ProtectedRoute><DestinationSearch /></ProtectedRoute>} />
       <Route path="/packages" element={<ProtectedRoute><PackagesBrowse /></ProtectedRoute>} />
       <Route path="/package/:id" element={<ProtectedRoute><PackageDetails /></ProtectedRoute>} />
       <Route path="/booking" element={<ProtectedRoute><BookingFlow /></ProtectedRoute>} />
-      <Route path="/offline-maps" element={<ProtectedRoute><OfflineMapsPage /></ProtectedRoute>} />
+      <Route path="/booking-confirmation" element={<ProtectedRoute><BookingConfirmationPage /></ProtectedRoute>} />
+      <Route path="/agencies" element={<ProtectedRoute><AgenciesPage /></ProtectedRoute>} />
+      <Route path="/profile" element={<ProtectedRoute><ProfilePage /></ProtectedRoute>} />
       
       {/* Payment Callback Pages */}
-      <Route path="/payment/esewa-success" element={<ESewaSuccessPage />} />
-      <Route path="/payment/esewa-failure" element={<ESewaFailurePage />} />
-      <Route path="/payment/mock-esewa" element={<MockESewaPayment />} />
       <Route path="/payment/khalti-success" element={<KhaltiSuccessPage />} />
       
       {/* Role-based Dashboards */}

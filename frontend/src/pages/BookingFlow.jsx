@@ -1,6 +1,6 @@
 ﻿import { useEffect, useMemo, useState } from 'react'
 import { useNavigate, useLocation } from 'react-router-dom'
-import { createBooking, initiateESewaPayment, initiateKhaltiPayment, cancelBooking } from '../services/tourism'
+import { createBooking, initiateKhaltiPayment, cancelBooking } from '../services/tourism'
 import { useAuth } from '../context/AuthContext'
 
 export default function BookingFlowPage() {
@@ -12,6 +12,8 @@ export default function BookingFlowPage() {
   const {
     packageId,
     packageTitle,
+    packageAgentId,
+    packageAgentName,
     departureId,
     departureDate,
     price,
@@ -100,40 +102,6 @@ export default function BookingFlowPage() {
   }
 
   async function handleProcessPayment() {
-    if (booking.payment_method === 'esewa') {
-      if (isPaymentExpired) {
-        setError('Payment window has expired. Please create a new booking.')
-        return
-      }
-
-      if (!bookingId) {
-        setError('Booking ID not found. Please try again.')
-        return
-      }
-
-      setLoading(true)
-      setError('')
-      try {
-        console.log('Initiating eSewa payment with:', { bookingId, totalAmount })
-        const result = await initiateESewaPayment(bookingId, totalAmount)
-        console.log('eSewa payment initiated:', result)
-        
-        // Redirect to eSewa payment portal
-        if (result.payment_url) {
-          console.log('Redirecting to:', result.payment_url)
-          window.location.href = result.payment_url
-        } else {
-          setError('Failed to generate payment URL. Please try again.')
-          setLoading(false)
-        }
-      } catch (err) {
-        console.error('eSewa payment error:', err)
-        setError(err.message || 'Failed to initiate eSewa payment')
-        setLoading(false)
-      }
-      return
-    }
-
     // Khalti hosted checkout flow
     if (isPaymentExpired) {
       setError('Payment window has expired. Please create a new booking.')
@@ -227,6 +195,9 @@ export default function BookingFlowPage() {
                     <strong>Package:</strong> {packageTitle}
                   </div>
                   <div className="summary-item">
+                    <strong>Agent:</strong> {packageAgentName || packageAgentId || 'Travel agency'}
+                  </div>
+                  <div className="summary-item">
                     <strong>Departure:</strong> {new Date(departureDate).toLocaleDateString()}
                   </div>
                   <div className="summary-item">
@@ -261,7 +232,6 @@ export default function BookingFlowPage() {
                     className="filter-select"
                   >
                     <option value="khalti">Khalti (Online)</option>
-                    <option value="esewa">eSewa (Online)</option>
                   </select>
                 </div>
 
@@ -309,25 +279,14 @@ export default function BookingFlowPage() {
 
                 <div className="payment-instructions">
                   <h4>
-                     {booking.payment_method === 'khalti' ? 'Khalti' : 'eSewa'} Payment Instructions
+                     Khalti Payment Instructions
                   </h4>
-                  {booking.payment_method === 'khalti' && (
-                    <ol>
-                      <li>Click "Pay with Khalti" button below</li>
-                      <li>You will be redirected to official Khalti payment page</li>
-                      <li>Enter your Khalti PIN/MPIN on Khalti securely</li>
-                      <li>After payment, you will return to this app automatically</li>
-                    </ol>
-                  )}
-                  {booking.payment_method === 'esewa' && (
-                    <ol>
-                      <li>Click "Pay with eSewa" button below</li>
-                      <li>You will be redirected to eSewa payment portal</li>
-                      <li>Complete the payment securely on eSewa</li>
-                      <li>You will be automatically redirected back</li>
-                      <li>Your booking will be confirmed instantly upon successful payment</li>
-                    </ol>
-                  )}
+                  <ol>
+                    <li>Click "Pay with Khalti" button below</li>
+                    <li>You will be redirected to official Khalti payment page</li>
+                    <li>Enter your Khalti PIN/MPIN on Khalti securely</li>
+                    <li>After payment, you will return to this app automatically</li>
+                  </ol>
                 </div>
 
                 {error && <p className="alert alert-error">{error}</p>}
@@ -353,7 +312,7 @@ export default function BookingFlowPage() {
                     onClick={handleProcessPayment}
                     disabled={loading || isPaymentExpired}
                   >
-                    {loading ? 'Processing...' : booking.payment_method === 'esewa' ? 'Pay with eSewa' : 'Pay with Khalti'}
+                    {loading ? 'Processing...' : 'Pay with Khalti'}
                   </button>
                 </div>
               </div>
@@ -401,6 +360,8 @@ export default function BookingFlowPage() {
 
                 <p className="confirmation-next-steps">
                    A confirmation email will be sent to {user?.email} shortly.
+                  <br />
+                  This booking belongs to {packageAgentName || 'the selected agent'} and will appear in that agent dashboard after payment is completed.
                   <br />
                   You can view your booking details in your dashboard.
                 </p>

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { Suspense, lazy, useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import Navbar from '../components/Navbar'
 import { useAuth } from '../context/AuthContext'
@@ -6,15 +6,17 @@ import {
   fetchDestinations,
   fetchPackages,
   fetchMyBookings,
-  fetchLatestOfflineMaps,
+  fetchAllPayments,
 } from '../services/tourism'
+import { buildCountSeries, buildMonthlySeries } from '../utils/analytics'
+
+const AnalyticsCharts = lazy(() => import('../components/AnalyticsCharts'))
 
 const navItems = [
   { id: 'overview', label: 'Overview', badge: '' },
   { id: 'destinations', label: 'Destinations', badge: '' },
   { id: 'packages', label: 'Packages', badge: '' },
   { id: 'bookings', label: 'Bookings', badge: '' },
-  { id: 'maps', label: 'Offline Maps', badge: '' },
   { id: 'payments', label: 'Payments', badge: '' },
 ]
 
@@ -26,8 +28,6 @@ function featureCardLabel(id) {
       return 'PK'
     case 'bookings':
       return 'BK'
-    case 'maps':
-      return 'MP'
     case 'payments':
       return 'PY'
     default:
@@ -47,26 +47,12 @@ export default function TouristDashboard() {
   const [bookingSearch, setBookingSearch] = useState('')
   const [packages, setPackages] = useState([])
   const [bookings, setBookings] = useState([])
-  const [selectedMapDestinationId, setSelectedMapDestinationId] = useState('')
-  const [offlineMaps, setOfflineMaps] = useState([])
-  const [mapsLoading, setMapsLoading] = useState(false)
+  const [payments, setPayments] = useState([])
   const [tabLoading, setTabLoading] = useState('')
 
   useEffect(() => {
     loadDashboard()
   }, [])
-
-  useEffect(() => {
-    if (activeTab === 'maps' && selectedMapDestinationId) {
-      loadMaps(selectedMapDestinationId)
-    }
-  }, [activeTab, selectedMapDestinationId])
-
-  useEffect(() => {
-    if (!selectedMapDestinationId && destinations.length > 0) {
-      setSelectedMapDestinationId(String(destinations[0].id))
-    }
-  }, [destinations, selectedMapDestinationId])
 
   async function loadAllPages(fetchFunc, initialData = {}) {
     let allResults = [...(initialData.results || [initialData])]
@@ -92,37 +78,45 @@ export default function TouristDashboard() {
     setLoadingPage(true)
     setError('')
     try {
-      const [destsData, pkgsData, bookingsData] = await Promise.all([
+      const [destsData, pkgsData, bookingsData, paymentsData] = await Promise.allSettled([
         fetchDestinations(),
         fetchPackages(),
         fetchMyBookings(),
+        fetchAllPayments(),
       ])
 
-      const dests = await loadAllPages(fetchDestinations, destsData)
-      const pkgs = await loadAllPages(fetchPackages, pkgsData)
-      const bks = await loadAllPages(fetchMyBookings, bookingsData)
+      const errors = []
+
+      const dests = destsData.status === 'fulfilled'
+        ? await loadAllPages(fetchDestinations, destsData.value)
+        : []
+      const pkgs = pkgsData.status === 'fulfilled'
+        ? await loadAllPages(fetchPackages, pkgsData.value)
+        : []
+      const bks = bookingsData.status === 'fulfilled'
+        ? await loadAllPages(fetchMyBookings, bookingsData.value)
+        : []
+      const pms = paymentsData.status === 'fulfilled'
+        ? await loadAllPages(fetchAllPayments, paymentsData.value)
+        : []
+
+      if (destsData.status === 'rejected') errors.push(destsData.reason?.message || 'Failed to load destinations.')
+      if (pkgsData.status === 'rejected') errors.push(pkgsData.reason?.message || 'Failed to load packages.')
+      if (bookingsData.status === 'rejected') errors.push(bookingsData.reason?.message || 'Failed to load bookings.')
+      if (paymentsData.status === 'rejected') errors.push(paymentsData.reason?.message || 'Failed to load payments.')
 
       setDestinations(dests)
       setPackages(pkgs)
       setBookings(bks)
+      setPayments(pms)
+
+      if (errors.length > 0) {
+        setError(errors.join(' | '))
+      }
     } catch (err) {
       setError(err.message || 'Failed to load dashboard data.')
     } finally {
       setLoadingPage(false)
-    }
-  }
-
-  async function loadMaps(destinationId) {
-    setMapsLoading(true)
-    setError('')
-    try {
-      const data = await fetchLatestOfflineMaps(destinationId)
-      setOfflineMaps(Array.isArray(data) ? data : [])
-    } catch (err) {
-      setOfflineMaps([])
-      setError(err.message || 'Failed to load offline maps.')
-    } finally {
-      setMapsLoading(false)
     }
   }
 
@@ -132,6 +126,17 @@ export default function TouristDashboard() {
     pending: bookings.filter((b) => b.status === 'pending').length,
     cancelled: bookings.filter((b) => b.status === 'cancelled').length,
   }), [bookings])
+
+  const paymentStats = useMemo(() => ({
+    total: payments.length,
+    refundedCount: payments.filter((payment) => payment.status === 'refunded').length,
+    refundedAmount: payments
+      .filter((payment) => payment.status === 'refunded')
+      .reduce((sum, payment) => sum + Number(payment.amount_npr || 0), 0),
+    successfulAmount: payments
+      .filter((payment) => payment.status === 'success')
+      .reduce((sum, payment) => sum + Number(payment.amount_npr || 0), 0),
+  }), [payments])
 
   const destinationStats = useMemo(() => ({
     total: destinations.length,
@@ -147,10 +152,6 @@ export default function TouristDashboard() {
 
   const recentBookings = useMemo(() => bookings.slice(0, 4), [bookings])
   const featuredDestinations = useMemo(() => destinations.slice(0, 4), [destinations])
-  const selectedMapDestination = useMemo(
-    () => destinations.find((d) => String(d.id) === String(selectedMapDestinationId)),
-    [destinations, selectedMapDestinationId]
-  )
   const filteredDestinations = useMemo(() => {
     const query = destinationSearch.trim().toLowerCase()
     if (!query) {
@@ -189,6 +190,7 @@ export default function TouristDashboard() {
       const values = [
         booking.booking_code,
         booking.package_title,
+        booking.agency_username,
         booking.destination_name,
         booking.status,
         booking.departure_date,
@@ -199,6 +201,27 @@ export default function TouristDashboard() {
       return values.includes(query)
     })
   }, [bookings, bookingSearch])
+
+  const bookingPieData = useMemo(() => ([
+    { name: 'Confirmed', value: bookings.filter((booking) => booking.status === 'confirmed').length, color: '#2563eb' },
+    { name: 'Pending', value: bookings.filter((booking) => booking.status === 'pending').length, color: '#f59e0b' },
+    { name: 'Cancelled', value: bookings.filter((booking) => booking.status === 'cancelled').length, color: '#ef4444' },
+  ]), [bookings])
+
+  const bookingTrendData = useMemo(() => buildMonthlySeries(
+    bookings,
+    'booking_date',
+    () => 1
+  ), [bookings])
+
+  const destinationProvinceData = useMemo(() => buildCountSeries(
+    destinations,
+    (destination) => destination.province || 'Unknown province',
+    () => 1,
+    6
+  ), [destinations])
+
+  const destinationProvinceTotal = destinationProvinceData.reduce((sum, item) => sum + Number(item.value || 0), 0)
 
   async function handleNavClick(tabId) {
     setTabLoading(tabId)
@@ -253,8 +276,8 @@ export default function TouristDashboard() {
             <button className="btn-secondary btn-block" style={{ marginTop: '8px' }} onClick={() => navigate('/destinations')}>
               Browse Destinations
             </button>
-            <button className="btn-secondary btn-block" style={{ marginTop: '8px' }} onClick={() => navigate('/offline-maps')}>
-              Offline Maps
+            <button className="btn-secondary btn-block" style={{ marginTop: '8px' }} onClick={() => navigate('/agencies')}>
+              Browse Agencies
             </button>
           </div>
         </aside>
@@ -275,7 +298,7 @@ export default function TouristDashboard() {
                     <div className="tourist-hero-kicker">Plan smarter, travel smoother</div>
                     <h1>Everything you need for planning is here</h1>
                     <p>
-                      Explore destinations, compare packages, manage bookings, open offline maps, and keep your next trip organized from one elegant dashboard.
+                      Explore destinations, compare packages, manage bookings, and keep your next trip organized from one elegant dashboard.
                     </p>
                     <div className="tourist-hero-actions">
                       <button className="btn-primary" onClick={() => handleNavClick('destinations')}>
@@ -283,9 +306,6 @@ export default function TouristDashboard() {
                       </button>
                       <button className="btn-secondary" onClick={() => handleNavClick('packages')}>
                         Browse Packages
-                      </button>
-                      <button className="btn-secondary" onClick={() => handleNavClick('maps')}>
-                        Offline Maps
                       </button>
                     </div>
                   </div>
@@ -328,9 +348,41 @@ export default function TouristDashboard() {
                   <p className="stat-label">Packages</p>
                 </div>
                 <div className="stat-card tourist">
-                  <p className="stat-number">{offlineMaps.length}</p>
-                  <p className="stat-label">Offline Maps</p>
+                  <p className="stat-number">{paymentStats.refundedCount}</p>
+                  <p className="stat-label">Refunds</p>
                 </div>
+              </section>
+
+              <section className="tourist-insights-section">
+                <div className="section-heading compact">
+                  <h2>Travel Insights</h2>
+                  <p>A quick visual summary of your travel activity and destination spread.</p>
+                </div>
+
+                <Suspense fallback={<div className="dashboard-chart-loading">Loading analytics charts...</div>}>
+                  <AnalyticsCharts
+                    pieTitle="Booking Status"
+                    pieDescription="How your trips are distributed right now."
+                    pieData={bookingPieData}
+                    pieTotalLabel="Total bookings"
+                    pieTotalValue={bookingStats.total}
+                    pieLegendItems={bookingPieData}
+                    lineTitle="Booking Trend"
+                    lineDescription="Your booking activity by month."
+                    lineData={bookingTrendData}
+                    lineStroke="#7c3aed"
+                    lineTotalLabel="Bookings"
+                    lineTotalValue={bookingStats.total}
+                    lineLegendItems={[{ label: 'Bookings by month', color: '#7c3aed' }]}
+                    barTitle="Destination Spread"
+                    barDescription="Active destinations grouped by province."
+                    barData={destinationProvinceData}
+                    barColor="#ef4444"
+                    barTotalLabel="Destinations"
+                    barTotalValue={destinationProvinceTotal}
+                    barLegendItems={[{ label: 'Destination count', color: '#ef4444' }]}
+                  />
+                </Suspense>
               </section>
 
               <div className="tourist-section-grid">
@@ -342,14 +394,20 @@ export default function TouristDashboard() {
                   <div className="tourist-feature-grid">
                     {[
                       { id: 'destinations', title: 'Destinations', desc: 'Discover active places and open destinations.' },
+                      { id: 'agencies', title: 'Agencies', desc: 'See active agencies and compare their packages.' },
                       { id: 'packages', title: 'Packages', desc: 'Compare normal, standard, and deluxe packages.' },
                       { id: 'bookings', title: 'Bookings', desc: 'Review booking status and trip progress.' },
-                      { id: 'maps', title: 'Offline Maps', desc: 'Open latest map packs for selected destinations.' },
                     ].map((feature) => (
                       <button
                         key={feature.id}
                         className="tourist-feature-card"
-                        onClick={() => handleNavClick(feature.id)}
+                        onClick={() => {
+                          if (feature.id === 'agencies') {
+                            navigate('/agencies')
+                            return
+                          }
+                          handleNavClick(feature.id)
+                        }}
                         disabled={tabLoading === feature.id}
                       >
                         <div className="tourist-feature-tag">{featureCardLabel(feature.id)}</div>
@@ -392,7 +450,7 @@ export default function TouristDashboard() {
                       <p>Simple reminders before your next trip.</p>
                     </div>
                     <ul className="tourist-tips-list">
-                      <li>Download offline maps before traveling.</li>
+                      <li>Review your booking details before departure.</li>
                       <li>Keep your booking code handy for check-in and support.</li>
                       <li>Use standard or deluxe packages for more comfort.</li>
                     </ul>
@@ -555,6 +613,7 @@ export default function TouristDashboard() {
                         <tr>
                           <th>Code</th>
                           <th>Package</th>
+                          <th>Agency</th>
                           <th>Destination</th>
                           <th>Status</th>
                           <th>Total</th>
@@ -566,6 +625,7 @@ export default function TouristDashboard() {
                           <tr key={b.id}>
                             <td><code>{b.booking_code}</code></td>
                             <td>{b.package_title}</td>
+                            <td>{b.agency_username || 'Travel agency'}</td>
                             <td>{b.destination_name}</td>
                             <td>
                               <span className={`badge badge-${b.status === 'confirmed' ? 'success' : b.status === 'cancelled' ? 'danger' : 'warning'}`}>
@@ -584,92 +644,32 @@ export default function TouristDashboard() {
             </div>
           )}
 
-          {activeTab === 'maps' && (
-            <div className="agent-content">
-              <div className="content-header">
-                <h1>Offline Maps</h1>
-                <p>Choose any destination and open the latest active map pack.</p>
-              </div>
-
-              <div className="card tourist-map-selector">
-                <div className="form-group">
-                  <label>Choose Destination</label>
-                  <select
-                    value={selectedMapDestinationId}
-                    onChange={(e) => setSelectedMapDestinationId(e.target.value)}
-                  >
-                    <option value="">Select destination</option>
-                    {destinations.map((dest) => (
-                      <option key={dest.id} value={dest.id}>{dest.name}</option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-
-              <div className="card">
-                <h3>Available Map Packs</h3>
-                {mapsLoading ? (
-                  <p className="loading-text">Loading offline maps...</p>
-                ) : !selectedMapDestinationId ? (
-                  <p className="empty-state">Select a destination to view available maps.</p>
-                ) : offlineMaps.length === 0 ? (
-                  <p className="empty-state">No active offline maps found for this destination.</p>
-                ) : (
-                  <div className="tourist-map-list">
-                    {offlineMaps.map((mapRow) => (
-                      <div className="tourist-map-item" key={mapRow.id}>
-                        <div>
-                          <h4>{mapRow.title}</h4>
-                          <p>
-                            {mapRow.destination_name} • {mapRow.version} • {mapRow.file_size_mb} MB
-                          </p>
-                        </div>
-                        <div className="tourist-map-actions">
-                          <a className="btn-secondary" href={mapRow.file_url} target="_blank" rel="noreferrer">
-                            View
-                          </a>
-                          <a className="btn-secondary" href={mapRow.file_url} download>
-                            Download
-                          </a>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            </div>
-          )}
-
           {activeTab === 'payments' && (
             <div className="agent-content">
               <div className="content-header">
                 <h1>Payments</h1>
-                <p>Review payment flow and continue to booking payment when needed.</p>
+                <p>Track your payments and any Khalti refunds processed by the admin.</p>
               </div>
 
               <div className="analytics-grid">
                 <div className="card analytics-card">
-                  <h3>Payment Journey</h3>
+                  <h3>Refund Summary</h3>
                   <div className="analytics-item">
-                    <span className="label">Pending Bookings:</span>
-                    <span className="value warning">{bookingStats.pending}</span>
+                    <span className="label">Refunded Payments:</span>
+                    <span className="value success">{paymentStats.refundedCount}</span>
                   </div>
                   <div className="analytics-item">
-                    <span className="label">Confirmed Trips:</span>
-                    <span className="value success">{bookingStats.confirmed}</span>
+                    <span className="label">Refunded Amount:</span>
+                    <span className="value success">NPR {paymentStats.refundedAmount.toLocaleString()}</span>
                   </div>
                   <div className="analytics-item">
-                    <span className="label">Action:</span>
-                    <span className="value">Continue from booking flow</span>
+                    <span className="label">Paid Amount:</span>
+                    <span className="value">NPR {paymentStats.successfulAmount.toLocaleString()}</span>
                   </div>
                 </div>
 
                 <div className="card analytics-card">
-                  <h3>Supported Methods</h3>
-                  <div className="analytics-item">
-                    <span className="label">eSewa</span>
-                    <span className="value success">Online</span>
-                  </div>
+                  <h3>Payment Methods</h3>
                   <div className="analytics-item">
                     <span className="label">Khalti</span>
                     <span className="value success">Online</span>
@@ -681,10 +681,49 @@ export default function TouristDashboard() {
                 </div>
               </div>
 
+              <div className="card tourist-summary-card compact" style={{ marginTop: '20px' }}>
+                <div className="section-heading compact">
+                  <h2>Your Payments</h2>
+                  <p>Refunded Khalti payments appear here with the same booking code and amount.</p>
+                </div>
+
+                {payments.length === 0 ? (
+                  <p className="empty-state">No payments yet. Complete a booking to see payment records here.</p>
+                ) : (
+                  <div className="modern-table-wrapper">
+                    <table className="modern-table">
+                      <thead>
+                        <tr>
+                          <th>Booking</th>
+                          <th>Method</th>
+                          <th>Amount</th>
+                          <th>Status</th>
+                          <th>Paid At</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {payments.map((payment) => (
+                          <tr key={payment.id}>
+                            <td><code>{payment.booking_code || 'N/A'}</code></td>
+                            <td>{payment.method}</td>
+                            <td>NPR {Number(payment.amount_npr || 0).toLocaleString()}</td>
+                            <td>
+                              <span className={`badge badge-${payment.status === 'refunded' ? 'success' : payment.status === 'success' ? 'info' : payment.status === 'failed' ? 'danger' : 'warning'}`}>
+                                {payment.status === 'refunded' ? 'Refunded via Khalti' : payment.status}
+                              </span>
+                            </td>
+                            <td>{payment.paid_at ? new Date(payment.paid_at).toLocaleString() : 'Pending'}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+
               <div className="tourist-hero-actions">
                 <button className="btn-primary tourist-cta" onClick={() => navigate('/packages')}>Browse Packages</button>
                 <button className="btn-secondary tourist-cta" onClick={() => navigate('/booking')}>Continue Booking</button>
-                <button className="btn-secondary tourist-cta" onClick={() => navigate('/offline-maps')}>Offline Maps</button>
               </div>
             </div>
           )}
